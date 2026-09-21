@@ -1,13 +1,14 @@
 name: Deploy on Tag
 
+# 只认 mark-v 前缀：上游 QuantumNous/new-api 的 v* tag 同步进来也不会触发部署
 on:
   push:
     tags:
-      - 'v*'
+      - 'mark-v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build and deploy (e.g. v1.2.3)'
+        description: 'Existing tag to build and deploy (e.g. mark-v1.2.3)'
         required: true
         type: string
 
@@ -26,6 +27,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -42,15 +44,18 @@ jobs:
           set -euo pipefail
           TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
           case "$TAG" in
-            v*) ;;
+            mark-v*) ;;
             *)
-              echo "::error::Tag '$TAG' must start with 'v'"
+              echo "::error::Tag '$TAG' must start with 'mark-v'; upstream tags are intentionally ignored"
               exit 1
               ;;
           esac
-          printf '%s\n' "$TAG" > VERSION
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Building $TAG"
+          # 镜像和运行时只保留去掉前缀的版本号：mark-v1.2.3 -> v1.2.3
+          VERSION="${TAG#mark-}"
+          printf '%s\n' "$VERSION" > VERSION
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building $TAG as $VERSION"
 
       - name: Compose image tags
         id: tags
@@ -222,10 +227,11 @@ jobs:
           password: ${{ secrets.GMAIL_PASSWORD }}
           from: ${{ secrets.GMAIL_USERNAME }}
           to: ${{ secrets.GMAIL_TO }}
-          subject: "[new-api] ${{ needs.build-and-push.outputs.version || github.ref_name }} 部署结果: build=${{ needs.build-and-push.result }}, deploy=${{ needs.deploy.result }}"
+          subject: "[new-api] ${{ needs.build-and-push.outputs.tag || github.ref_name }} 部署结果: build=${{ needs.build-and-push.result }}, deploy=${{ needs.deploy.result }}"
           body: |
             仓库: ${{ github.repository }}
-            版本: ${{ needs.build-and-push.outputs.version || github.ref_name }}
+            Tag: ${{ needs.build-and-push.outputs.tag || github.ref_name }}
+            镜像版本: ${{ needs.build-and-push.outputs.version }}
             触发: ${{ github.event_name }}
             构建: ${{ needs.build-and-push.result }}
             部署: ${{ needs.deploy.result }}
