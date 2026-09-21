@@ -1,0 +1,49 @@
+# new-api 服务器端部署模板（配合 .github/workflows/deploy.yml 使用）
+#
+# 目录约定：
+#   本文件放在 DEPLOY_DIR（GitHub secret），例如 /home/DockerCompose/new-api
+#   应用数据仍在 /home/DockerVolumes/new-api，路径不变，原有数据原样沿用
+#   DEPLOY_DIR/.env 只存 REGISTRY_REPO 和 VERSION，由 GitHub Actions 每次部署自动写入
+#   应用自身的环境变量仍读 /home/DockerVolumes/new-api/.env，与原版完全一致
+#
+# 故意不在这里定义 redis / postgres / mysql：
+#   沿用服务器上已有的数据库与缓存容器，避免新建实例导致数据分叉。
+#   连接串继续由 /home/DockerVolumes/new-api/.env 里的 SQL_DSN / REDIS_CONN_STRING 提供。
+#
+# 首次部署前：
+#   1. mkdir -p /home/DockerCompose/new-api 并把本文件复制过去
+#   2. 在服务器上 docker login <REGISTRY> 一次
+#   3. 停掉并删除原版 new-api 容器（容器名冲突），数据目录不要动
+
+services:
+  new-api:
+    image: ${REGISTRY_REPO:?REGISTRY_REPO is required}:${VERSION:?VERSION is required}
+    container_name: new-api
+    restart: always
+    labels:
+      # 版本由 GitHub Actions 控制，显式排除 watchtower，防止它把容器自动更新掉
+      - "com.centurylinklabs.watchtower.enable=false"
+    command: --log-dir /app/logs
+    ports:
+      - "3000:3000"
+    env_file:
+      - /home/DockerVolumes/new-api/.env
+    volumes:
+      - /home/DockerVolumes/new-api/data:/data
+      - /home/DockerVolumes/new-api/logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      # 让运行中的实例显示本次部署的 tag（common/init.go 支持 VERSION 覆盖编译期版本号）
+      - VERSION=${VERSION}
+    networks:
+      - mynet
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  mynet:
+    external: true
