@@ -35,6 +35,7 @@ import type {
   GetChannelResponse,
   GetChannelsParams,
   GetChannelsResponse,
+  MultiKeyAddInput,
   MultiKeyManageParams,
   MultiKeyStatusResponse,
   SearchChannelsParams,
@@ -342,20 +343,20 @@ export async function deleteDisabledChannels(): Promise<{
 }
 
 /**
- * Get channel key (requires 2FA verification)
+ * Get channel key (root only)
  */
 export async function getChannelKey(
   id: number,
-  proofToken: string,
   signal?: AbortSignal
-): Promise<{ success: boolean; message?: string; data?: { key: string } }> {
+): Promise<{
+  success: boolean
+  message?: string
+  data?: { key: string; remarks?: Record<string, string> | null }
+}> {
   const res = await api.post(
     `/api/channel/${id}/key`,
     undefined,
-    channelActionConfig({
-      headers: { 'X-Security-Proof': proofToken },
-      signal,
-    })
+    channelActionConfig({ signal })
   )
   return res.data
 }
@@ -506,6 +507,40 @@ export async function disableAllMultiKeys(
     channel_id: channelId,
     action: 'disable_all_keys',
   }) as Promise<{ success: boolean; message?: string }>
+}
+
+/**
+ * Update one key's value, its remark, or both.
+ *
+ * Only the fields passed here are changed, so a remark edit never touches key
+ * material and two editors working on different keys cannot overwrite each
+ * other. Writing key material is root-only and enforced server side.
+ */
+export async function updateMultiKey(
+  channelId: number,
+  keyIndex: number,
+  changes: { key?: string; remark?: string }
+): Promise<{ success: boolean; message?: string }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'update_key',
+    key_index: keyIndex,
+    ...changes,
+  }) as Promise<{ success: boolean; message?: string }>
+}
+
+/**
+ * Append keys to a multi-key channel, each with an optional remark.
+ */
+export async function addMultiKeys(
+  channelId: number,
+  keys: MultiKeyAddInput[]
+): Promise<{ success: boolean; message?: string; data?: number }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'add_keys',
+    keys,
+  }) as Promise<{ success: boolean; message?: string; data?: number }>
 }
 
 /**

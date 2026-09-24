@@ -17,8 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { Loader2, Plus, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -42,6 +42,7 @@ import {
   hasPermission,
 } from '@/lib/admin-permissions'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
@@ -60,9 +61,12 @@ import {
   getMultiKeyStatusConfig,
   getMultiKeyConfirmMessage,
   isDestructiveAction,
+  resolveKeyEntryFormat,
 } from '../../lib'
 import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
 import { useChannels } from '../channels-provider'
+import { MultiKeyAddDialog } from './multi-key-add-dialog'
+import { MultiKeyEditDialog } from './multi-key-edit-dialog'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
 
@@ -101,6 +105,28 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [editingKey, setEditingKey] = useState<KeyStatus | null>(null)
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+
+  // Writing key material requires root, matching the server-side gate on the
+  // update_key and add_keys actions.
+  const canEditKeys = currentUser?.role === ROLE.SUPER_ADMIN
+
+  const keyFormat = useMemo(() => {
+    let awsKeyType: string | undefined
+    let vertexKeyType: string | undefined
+    if (currentRow?.settings) {
+      try {
+        const parsed: { aws_key_type?: string; vertex_key_type?: string } =
+          JSON.parse(currentRow.settings)
+        awsKeyType = parsed.aws_key_type
+        vertexKeyType = parsed.vertex_key_type
+      } catch {
+        // Malformed settings fall back to the plain single-field key form.
+      }
+    }
+    return resolveKeyEntryFormat(currentRow?.type ?? 0, awsKeyType, vertexKeyType)
+  }, [currentRow?.settings, currentRow?.type])
 
   // Reset and load data when dialog opens
   useEffect(() => {
@@ -322,6 +348,17 @@ export function MultiKeyManageDialog({
                 <RefreshCw className='h-4 w-4' />
               </Button>
 
+              {canEditKeys && (
+                <Button
+                  variant='default'
+                  size='sm'
+                  onClick={() => setIsAddDialogOpen(true)}
+                >
+                  <Plus className='mr-2 h-4 w-4' />
+                  {t('Add keys')}
+                </Button>
+              )}
+
               {manualDisabledCount + autoDisabledCount > 0 && (
                 <Button
                   variant='default'
@@ -398,6 +435,20 @@ export function MultiKeyManageDialog({
                     cell: (key) => `#${key.index + 1}`,
                   },
                   {
+                    id: 'key',
+                    header: t('Key'),
+                    className: 'w-44',
+                    cellClassName: 'font-mono text-sm',
+                    cell: (key) => key.key_preview || '-',
+                  },
+                  {
+                    id: 'remark',
+                    header: t('Remark'),
+                    className: 'min-w-[160px]',
+                    cellClassName: 'max-w-xs truncate text-sm',
+                    cell: (key) => key.remark || '-',
+                  },
+                  {
                     id: 'status',
                     header: t('Status'),
                     className: 'w-32',
@@ -426,7 +477,9 @@ export function MultiKeyManageDialog({
                         keyIndex={key.index}
                         status={key.status}
                         canDelete={canEditSensitive}
+                        canEdit={canEditKeys}
                         onAction={setConfirmAction}
+                        onEdit={() => setEditingKey(key)}
                       />
                     ),
                   },
@@ -476,6 +529,29 @@ export function MultiKeyManageDialog({
         destructive={isDestructiveAction(confirmAction)}
         isLoading={isPerformingAction}
         handleConfirm={performAction}
+      />
+
+      <MultiKeyEditDialog
+        open={editingKey !== null}
+        onOpenChange={(open) => !open && setEditingKey(null)}
+        channelId={currentRow.id}
+        keyStatus={editingKey}
+        format={keyFormat}
+        onSaved={() => {
+          queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+          loadKeyStatus()
+        }}
+      />
+
+      <MultiKeyAddDialog
+        open={isAddDialogOpen}
+        onOpenChange={setIsAddDialogOpen}
+        channelId={currentRow.id}
+        format={keyFormat}
+        onSaved={() => {
+          queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+          loadKeyStatus()
+        }}
       />
     </>
   )

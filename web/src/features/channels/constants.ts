@@ -332,6 +332,16 @@ export const MULTI_KEY_CONFIRM_MESSAGES = {
     'Are you sure you want to delete all auto-disabled keys? This action cannot be undone.',
 } as const
 
+export const MULTI_KEY_SUCCESS_MESSAGES = {
+  KEY_UPDATED: 'Key updated successfully',
+  KEYS_ADDED: 'Keys added successfully',
+} as const
+
+export const MULTI_KEY_ERROR_MESSAGES = {
+  UPDATE_KEY_FAILED: 'Failed to update key',
+  ADD_KEYS_FAILED: 'Failed to add keys',
+} as const
+
 // ============================================================================
 // Auto Ban Options
 // ============================================================================
@@ -349,6 +359,7 @@ export const ERROR_MESSAGES = {
   REQUIRED_NAME: 'Channel name is required',
   REQUIRED_TYPE: 'Channel type is required',
   REQUIRED_KEY: 'API key is required',
+  INVALID_KEY_ROWS: 'Some keys are incomplete or invalid. Fix the marked rows.',
   REQUIRED_MODELS: 'Models are required',
   REQUIRED_GROUP: 'Group is required',
   INVALID_JSON: 'Invalid JSON format',

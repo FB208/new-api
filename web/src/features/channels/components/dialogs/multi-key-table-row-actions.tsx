@@ -26,20 +26,34 @@ type MultiKeyTableRowActionsProps = {
   keyIndex: number
   status: number
   canDelete: boolean
+  canEdit: boolean
   onAction: (action: MultiKeyConfirmAction) => void
+  onEdit: () => void
 }
 
 export function MultiKeyTableRowActions({
   keyIndex,
   status,
   canDelete,
+  canEdit,
   onAction,
+  onEdit,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
   const isEnabled = status === 1
 
   return (
     <div className='flex justify-end gap-2'>
+      {canEdit && (
+        <Button
+          variant='outline'
+          size='sm'
+          onClick={onEdit}
+          aria-label={t('Edit key {{number}}', { number: keyIndex + 1 })}
+        >
+          {t('Edit')}
+        </Button>
+      )}
       {isEnabled ? (
         <Button
           variant='outline'

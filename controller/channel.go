@@ -71,6 +71,7 @@ func clearChannelInfo(channel *model.Channel) {
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
+		channel.ChannelInfo.MultiKeyRemark = nil
 	}
 }
 
@@ -533,7 +534,8 @@ func GetChannelKey(c *gin.Context) {
 		"success": true,
 		"message": "获取成功",
 		"data": map[string]any{
-			"key": channel.Key,
+			"key":     channel.Key,
+			"remarks": channel.ChannelInfo.MultiKeyRemark,
 		},
 	})
 }
@@ -712,6 +714,8 @@ type AddChannelRequest struct {
 	MultiKeyMode              constant.MultiKeyMode `json:"multi_key_mode"`
 	BatchAddSetKeyPrefix2Name bool                  `json:"batch_add_set_key_prefix_2_name"`
 	Channel                   *model.Channel        `json:"channel"`
+	// KeyRemarks 仅用于 multi_to_single：按去除空行后的密钥列表下标标注备注。
+	KeyRemarks map[int]string `json:"key_remarks,omitempty"`
 }
 
 func getVertexArrayKeys(keys string) ([]string, error) {
@@ -806,6 +810,23 @@ func AddChannel(c *gin.Context) {
 			}
 			addChannelRequest.Channel.ChannelInfo.MultiKeySize = len(cleanKeys)
 			addChannelRequest.Channel.Key = strings.Join(cleanKeys, "\n")
+		}
+		for index, remark := range addChannelRequest.KeyRemarks {
+			remark = strings.TrimSpace(remark)
+			if remark == "" || index < 0 || index >= addChannelRequest.Channel.ChannelInfo.MultiKeySize {
+				continue
+			}
+			if len([]rune(remark)) > multiKeyRemarkMaxLength {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": fmt.Sprintf("备注长度不能超过 %d 个字符", multiKeyRemarkMaxLength),
+				})
+				return
+			}
+			if addChannelRequest.Channel.ChannelInfo.MultiKeyRemark == nil {
+				addChannelRequest.Channel.ChannelInfo.MultiKeyRemark = make(map[int]string)
+			}
+			addChannelRequest.Channel.ChannelInfo.MultiKeyRemark[index] = remark
 		}
 		keys = []string{addChannelRequest.Channel.Key}
 	case "batch":
@@ -1104,6 +1125,8 @@ type PatchChannel struct {
 	model.Channel
 	MultiKeyMode *string `json:"multi_key_mode"`
 	KeyMode      *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
+	// KeyRemarks 仅用于 replace：按新密钥列表下标标注备注。
+	KeyRemarks map[int]string `json:"key_remarks,omitempty"`
 }
 
 type ChannelStatusRequest struct {
@@ -1277,7 +1300,55 @@ func UpdateChannel(c *gin.Context) {
 				channel.Key = strings.Join(allKeys, "\n")
 			}
 		case "replace":
-			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
+			// 覆盖模式：整体换成提交的密钥列表。禁用状态按密钥内容跟随原密钥，
+			// 不按下标留给占用同一位置的其他密钥；备注以本次提交为准。
+			oldIndexes := make(map[string][]int)
+			for index, key := range originChannel.GetKeys() {
+				key = strings.TrimSpace(key)
+				oldIndexes[key] = append(oldIndexes[key], index)
+			}
+			info := &channel.ChannelInfo
+			statusList := make(map[int]int)
+			disabledReason := make(map[int]string)
+			disabledTime := make(map[int]int64)
+			newKeys := channel.GetKeys()
+			for newIndex, key := range newKeys {
+				key = strings.TrimSpace(key)
+				matches := oldIndexes[key]
+				if len(matches) == 0 {
+					continue
+				}
+				oldIndex := matches[0]
+				oldIndexes[key] = matches[1:]
+				if status, ok := info.MultiKeyStatusList[oldIndex]; ok {
+					statusList[newIndex] = status
+				}
+				if reason, ok := info.MultiKeyDisabledReason[oldIndex]; ok {
+					disabledReason[newIndex] = reason
+				}
+				if disabledAt, ok := info.MultiKeyDisabledTime[oldIndex]; ok {
+					disabledTime[newIndex] = disabledAt
+				}
+			}
+			remarks := make(map[int]string)
+			for index, remark := range channel.KeyRemarks {
+				remark = strings.TrimSpace(remark)
+				if remark == "" || index < 0 || index >= len(newKeys) {
+					continue
+				}
+				if len([]rune(remark)) > multiKeyRemarkMaxLength {
+					c.JSON(http.StatusOK, gin.H{
+						"success": false,
+						"message": fmt.Sprintf("备注长度不能超过 %d 个字符", multiKeyRemarkMaxLength),
+					})
+					return
+				}
+				remarks[index] = remark
+			}
+			info.MultiKeyStatusList = statusList
+			info.MultiKeyDisabledReason = disabledReason
+			info.MultiKeyDisabledTime = disabledTime
+			info.MultiKeyRemark = remarks
 		}
 	}
 	err = channel.Update()
@@ -1683,7 +1754,20 @@ type MultiKeyManageRequest struct {
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
 	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	// update_key 只修改提交了的字段，未提交的保持原值。
+	Key    *string            `json:"key,omitempty"`    // for update_key: new key value
+	Remark *string            `json:"remark,omitempty"` // for update_key: new remark
+	Keys   []MultiKeyAddInput `json:"keys,omitempty"`   // for add_keys
 }
+
+// MultiKeyAddInput 是 add_keys 追加的单条密钥及其备注。
+type MultiKeyAddInput struct {
+	Key    string `json:"key"`
+	Remark string `json:"remark"`
+}
+
+// multiKeyRemarkMaxLength 与前端 KEY_REMARK_MAX_LENGTH 保持一致。
+const multiKeyRemarkMaxLength = 128
 
 // MultiKeyStatusResponse represents the response for key status query
 type MultiKeyStatusResponse struct {
@@ -1703,7 +1787,18 @@ type KeyStatus struct {
 	Status       int    `json:"status"` // 1: enabled, 2: disabled
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
+	KeyPreview   string `json:"key_preview"` // masked key for identification
+	Remark       string `json:"remark,omitempty"`
+}
+
+// maskKeyPreview 保留首尾各 4 个字符。同一供应商的密钥常有相同前缀，只显示前缀会让多条密钥看起来一样。
+func maskKeyPreview(key string) string {
+	const edge = 4
+	runes := []rune(key)
+	if len(runes) <= edge*2 {
+		return key
+	}
+	return string(runes[:edge]) + "..." + string(runes[len(runes)-edge:])
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1733,6 +1828,10 @@ func ManageMultiKeys(c *gin.Context) {
 	}
 	if multiKeyActionRequiresSensitiveWrite(request.Action) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
+		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
+		return
+	}
+	if multiKeyActionRequiresRoot(request.Action) && c.GetInt("role") < common.RoleRootUser {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
 		return
 	}
@@ -1800,18 +1899,13 @@ func ManageMultiKeys(c *gin.Context) {
 				}
 			}
 
-			// Create key preview (first 10 chars)
-			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
-			}
-
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
 				Index:        i,
 				Status:       status,
 				DisabledTime: disabledTime,
 				Reason:       reason,
-				KeyPreview:   keyPreview,
+				KeyPreview:   maskKeyPreview(key),
+				Remark:       channel.ChannelInfo.MultiKeyRemark[i],
 			})
 		}
 
@@ -2050,6 +2144,7 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newRemark = make(map[int]string)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -2076,6 +2171,9 @@ func ManageMultiKeys(c *gin.Context) {
 					newDisabledReason[newIndex] = r
 				}
 			}
+			if r, exists := channel.ChannelInfo.MultiKeyRemark[i]; exists {
+				newRemark[newIndex] = r
+			}
 			newIndex++
 		}
 
@@ -2093,6 +2191,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyRemark = newRemark
 
 		shouldCloseWebSocket := disableMultiKeyChannelIfUnavailable(channel)
 		err = channel.Update()
@@ -2117,6 +2216,7 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newRemark = make(map[int]string)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -2146,6 +2246,9 @@ func ManageMultiKeys(c *gin.Context) {
 						}
 					}
 				}
+				if r, exists := channel.ChannelInfo.MultiKeyRemark[i]; exists {
+					newRemark[newIndex] = r
+				}
 				newIndex++
 			}
 		}
@@ -2164,6 +2267,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyRemark = newRemark
 
 		shouldCloseWebSocket := disableMultiKeyChannelIfUnavailable(channel)
 		err = channel.Update()
@@ -2182,6 +2286,137 @@ func ManageMultiKeys(c *gin.Context) {
 		})
 		return
 
+	case "update_key":
+		if request.KeyIndex == nil || (request.Key == nil && request.Remark == nil) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "未指定要修改的密钥或内容",
+			})
+			return
+		}
+		keys := channel.GetKeys()
+		keyIndex := *request.KeyIndex
+		if keyIndex < 0 || keyIndex >= len(keys) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "密钥索引超出范围",
+			})
+			return
+		}
+
+		if request.Remark != nil {
+			remark := strings.TrimSpace(*request.Remark)
+			if len([]rune(remark)) > multiKeyRemarkMaxLength {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": fmt.Sprintf("备注长度不能超过 %d 个字符", multiKeyRemarkMaxLength),
+				})
+				return
+			}
+			if remark == "" {
+				delete(channel.ChannelInfo.MultiKeyRemark, keyIndex)
+			} else {
+				if channel.ChannelInfo.MultiKeyRemark == nil {
+					channel.ChannelInfo.MultiKeyRemark = make(map[int]string)
+				}
+				channel.ChannelInfo.MultiKeyRemark[keyIndex] = remark
+			}
+		}
+
+		if request.Key != nil {
+			if strings.TrimSpace(*request.Key) == "" {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": "密钥不能为空",
+				})
+				return
+			}
+			newKey, err := normalizeMultiKeyValue(channel, *request.Key)
+			if err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": err.Error(),
+				})
+				return
+			}
+			keys[keyIndex] = newKey
+			channel.Key = strings.Join(keys, "\n")
+			// 换成新密钥后，旧密钥的禁用状态不再适用，恢复为启用。
+			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+			delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
+			delete(channel.ChannelInfo.MultiKeyDisabledTime, keyIndex)
+			restoreMultiKeyChannelIfAvailable(channel)
+		}
+
+		err = channel.Update()
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "密钥已更新",
+		})
+		return
+
+	case "add_keys":
+		keys := channel.GetKeys()
+		originalSize := len(keys)
+		for _, input := range request.Keys {
+			if strings.TrimSpace(input.Key) == "" {
+				continue
+			}
+			newKey, err := normalizeMultiKeyValue(channel, input.Key)
+			if err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": err.Error(),
+				})
+				return
+			}
+			remark := strings.TrimSpace(input.Remark)
+			if len([]rune(remark)) > multiKeyRemarkMaxLength {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": fmt.Sprintf("备注长度不能超过 %d 个字符", multiKeyRemarkMaxLength),
+				})
+				return
+			}
+			if remark != "" {
+				if channel.ChannelInfo.MultiKeyRemark == nil {
+					channel.ChannelInfo.MultiKeyRemark = make(map[int]string)
+				}
+				channel.ChannelInfo.MultiKeyRemark[len(keys)] = remark
+			}
+			keys = append(keys, newKey)
+		}
+
+		addedCount := len(keys) - originalSize
+		if addedCount == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "没有有效的密钥",
+			})
+			return
+		}
+		channel.Key = strings.Join(keys, "\n")
+		channel.ChannelInfo.MultiKeySize = len(keys)
+		restoreMultiKeyChannelIfAvailable(channel)
+
+		err = channel.Update()
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": fmt.Sprintf("已新增 %d 个密钥", addedCount),
+			"data":    addedCount,
+		})
+		return
+
 	default:
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -2193,6 +2428,35 @@ func ManageMultiKeys(c *gin.Context) {
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
 	return action == "delete_key" || action == "delete_disabled_keys"
+}
+
+// multiKeyActionRequiresRoot：写入密钥内容的操作仅限超级管理员，与查看密钥明文的权限一致。
+func multiKeyActionRequiresRoot(action string) bool {
+	return action == "update_key" || action == "add_keys"
+}
+
+// normalizeMultiKeyValue 返回可安全存储的单条密钥。多密钥按换行拼接存储，
+// 密钥内含换行会在读取时被拆成多条，导致密钥数量和备注下标错位。
+func normalizeMultiKeyValue(channel *model.Channel, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	isVertexCredential := channel.Type == constant.ChannelTypeVertexAi &&
+		channel.GetOtherSettings().VertexKeyType != dto.VertexKeyTypeAPIKey
+	if isVertexCredential {
+		// 服务账号 JSON 常以多行格式粘贴，压缩为单行后再存储。
+		var credential map[string]any
+		if err := common.Unmarshal([]byte(key), &credential); err != nil {
+			return "", fmt.Errorf("Vertex AI 密钥必须是合法的 JSON 对象: %w", err)
+		}
+		compacted, err := common.Marshal(credential)
+		if err != nil {
+			return "", fmt.Errorf("Vertex AI 密钥序列化失败: %w", err)
+		}
+		return string(compacted), nil
+	}
+	if strings.ContainsAny(key, "\r\n") {
+		return "", errors.New("密钥不能包含换行符")
+	}
+	return key, nil
 }
 
 // OllamaPullModel 拉取 Ollama 模型

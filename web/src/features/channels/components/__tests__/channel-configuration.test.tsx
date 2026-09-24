@@ -1015,10 +1015,7 @@ test('an invalid setting in another category is revealed and focused on submissi
   )
 })
 
-test.each([
-  ['batch', 'Batch Add (one key per line)'],
-  ['multi_to_single', 'Multi-Key Mode (multiple keys, one channel)'],
-])('plugin creation preserves the %s request contract', async (mode, label) => {
+test('plugin creation preserves the batch request contract', async () => {
   const post = vi
     .spyOn(api, 'post')
     .mockResolvedValue({ data: { success: true } })
@@ -1026,7 +1023,9 @@ test.each([
   render(<ConfigurationHarness />)
   await user.click(await screen.findByRole('option', { name: /Video A/ }))
   await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
-  await user.click(screen.getByRole('option', { name: label }))
+  await user.click(
+    screen.getByRole('option', { name: 'Batch Add (one key per line)' })
+  )
   fireEvent.change(screen.getByLabelText('API Key *'), {
     target: { value: 'first-key\nsecond-key' },
   })
@@ -1035,11 +1034,412 @@ test.each([
     expect(post).toHaveBeenCalledWith(
       '/api/channel',
       expect.objectContaining({
-        mode,
+        mode: 'batch',
         channel: expect.objectContaining({
           key: 'first-key\nsecond-key',
           type: 61,
         }),
+      }),
+      expect.anything()
+    )
+  )
+})
+
+// Multi-key creation is entered one row at a time; the request contract still
+// carries the keys newline-joined in a single `key` field.
+test('multi-key creation joins the edited rows into one key field', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'first-key' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 2'), {
+    target: { value: 'second-key' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel',
+      expect.objectContaining({
+        mode: 'multi_to_single',
+        channel: expect.objectContaining({
+          key: 'first-key\nsecond-key',
+          type: 61,
+        }),
+      }),
+      expect.anything()
+    )
+  )
+})
+
+// Credentials must not survive into the next creation session: the rows are
+// component state, so they outlive the form reset unless cleared explicitly.
+test('a new creation session does not restore the previous multi-key rows', async () => {
+  vi.spyOn(api, 'post').mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'sk-previous-session-secret' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Open channel' }))
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  expect(
+    screen.queryByDisplayValue('sk-previous-session-secret')
+  ).not.toBeInTheDocument()
+})
+
+// Clearing the rows on mode exit must not lose input: the flat key value stays
+// the source of truth, so returning to multi-key mode rebuilds the same rows.
+test('leaving and re-entering multi-key mode keeps the entered keys', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'sk-first' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 2'), {
+    target: { value: 'sk-second' },
+  })
+
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(screen.getByRole('option', { name: 'Single Key' }))
+  expect(screen.getByLabelText('API Key *')).toHaveValue('sk-first\nsk-second')
+
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  expect(screen.getByLabelText('Key 1')).toHaveValue('sk-first')
+  expect(screen.getByLabelText('Key 2')).toHaveValue('sk-second')
+})
+
+// Deduplication only removes repeated keys; the remarks already typed for the
+// keys that stay must survive it.
+test('removing duplicate multi-key rows keeps the remaining remarks', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'sk-a' },
+  })
+  fireEvent.change(screen.getByLabelText('Remark for key 1'), {
+    target: { value: 'first' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 2'), {
+    target: { value: 'sk-b' },
+  })
+  fireEvent.change(screen.getByLabelText('Remark for key 2'), {
+    target: { value: 'second' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 3'), {
+    target: { value: 'sk-a' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Remove Duplicates' }))
+
+  expect(screen.getByLabelText('Key 1')).toHaveValue('sk-a')
+  expect(screen.getByLabelText('Remark for key 1')).toHaveValue('first')
+  expect(screen.getByLabelText('Key 2')).toHaveValue('sk-b')
+  expect(screen.getByLabelText('Remark for key 2')).toHaveValue('second')
+  expect(screen.queryByLabelText('Key 3')).not.toBeInTheDocument()
+})
+
+// Filling only one AWS field yields a key like "AK||". The row shows the error,
+// but the flat key field is only checked for being non-empty, so without an
+// explicit check the unusable credential would be saved.
+test('multi-key creation is blocked while an AWS row is incomplete', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(
+    await screen.findByRole('option', { name: /AWS Built-in #33/ })
+  )
+  await user.type(
+    screen.getByRole('combobox', { name: 'Select models or add custom ones' }),
+    'claude-3-haiku,'
+  )
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+  fireEvent.change(screen.getByLabelText('Access Key'), {
+    target: { value: 'AKIA-ONLY' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+
+  expect(
+    await screen.findByText(
+      'Some keys are incomplete or invalid. Fix the marked rows.'
+    )
+  ).toBeVisible()
+  expect(screen.getByLabelText('Access Key')).toHaveAttribute(
+    'aria-invalid',
+    'true'
+  )
+  expect(post).not.toHaveBeenCalledWith(
+    '/api/channel',
+    expect.anything(),
+    expect.anything()
+  )
+})
+
+// Pasted connection info writes the key field directly. The rows must be rebuilt
+// from it, otherwise the next row edit serializes the stale rows back into the
+// field and the pasted credentials are lost.
+test('filling in connection info replaces the multi-key rows', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  vi.spyOn(navigator.clipboard, 'readText').mockResolvedValue(
+    JSON.stringify({
+      _type: 'newapi_channel_conn',
+      key: 'sk-pasted-one\nsk-pasted-two',
+      url: 'https://pasted.example',
+    })
+  )
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'sk-typed-before' },
+  })
+  fireEvent.change(screen.getByLabelText('Remark for key 1'), {
+    target: { value: 'stale remark' },
+  })
+
+  await user.click(await screen.findByRole('button', { name: 'Fill in' }))
+
+  expect(screen.getByLabelText('Key 1')).toHaveValue('sk-pasted-one')
+  expect(screen.getByLabelText('Key 2')).toHaveValue('sk-pasted-two')
+  // The remark described the replaced key, not the pasted one.
+  expect(screen.getByLabelText('Remark for key 1')).toHaveValue('')
+
+  fireEvent.change(screen.getByLabelText('Remark for key 2'), {
+    target: { value: 'secondary' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel',
+      expect.objectContaining({
+        key_remarks: { 1: 'secondary' },
+        channel: expect.objectContaining({
+          key: 'sk-pasted-one\nsk-pasted-two',
+        }),
+      }),
+      expect.anything()
+    )
+  )
+})
+
+test('uploading service account files replaces the Vertex multi-key rows', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(
+    await screen.findByRole('option', { name: /Vertex AI Built-in #41/ })
+  )
+  fireEvent.change(screen.getByLabelText('Deployment Region *'), {
+    target: { value: 'us-central1' },
+  })
+  await user.type(
+    screen.getByRole('combobox', { name: 'Select models or add custom ones' }),
+    'gemini-2.0-flash,'
+  )
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  await user.upload(screen.getByLabelText('Service account JSON file(s)'), [
+    new File(['{\n  "client_email": "a@x.com"\n}'], 'a.json', {
+      type: 'application/json',
+    }),
+    new File(['{\n  "client_email": "b@x.com"\n}'], 'b.json', {
+      type: 'application/json',
+    }),
+  ])
+
+  await waitFor(() =>
+    expect(screen.getByLabelText('Key 1')).toHaveValue(
+      '{"client_email":"a@x.com"}'
+    )
+  )
+  expect(screen.getByLabelText('Key 2')).toHaveValue(
+    '{"client_email":"b@x.com"}'
+  )
+
+  // Editing a remark re-serializes the rows; the uploaded credentials must be
+  // what gets written back, not the empty row that was there before.
+  fireEvent.change(screen.getByLabelText('Remark for key 1'), {
+    target: { value: 'primary' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel',
+      expect.objectContaining({
+        key_remarks: { 0: 'primary' },
+        channel: expect.objectContaining({
+          key: '[{"client_email":"a@x.com"},{"client_email":"b@x.com"}]',
+        }),
+      }),
+      expect.anything()
+    )
+  )
+})
+
+// AddChannel parses a Vertex service account channel's keys with
+// getVertexArrayKeys, which only accepts a JSON array. Newline-joining the rows
+// would make this channel type impossible to create as multi-key.
+test('multi-key creation sends Vertex service account rows as a JSON array', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(
+    await screen.findByRole('option', { name: /Vertex AI Built-in #41/ })
+  )
+  fireEvent.change(screen.getByLabelText('Deployment Region *'), {
+    target: { value: 'us-central1' },
+  })
+  await user.type(
+    screen.getByRole('combobox', { name: 'Select models or add custom ones' }),
+    'gemini-2.0-flash,'
+  )
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: '{"client_email":"a@x.com"}' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 2'), {
+    target: { value: '{"client_email":"b@x.com"}' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel',
+      expect.objectContaining({
+        mode: 'multi_to_single',
+        channel: expect.objectContaining({
+          key: '[{"client_email":"a@x.com"},{"client_email":"b@x.com"}]',
+          type: 41,
+        }),
+      }),
+      expect.anything()
+    )
+  )
+})
+
+test('multi-key creation sends each row remark indexed against its key', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  await user.click(screen.getByRole('combobox', { name: 'Add Mode' }))
+  await user.click(
+    screen.getByRole('option', {
+      name: 'Multi-Key Mode (multiple keys, one channel)',
+    })
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Add key' }))
+  fireEvent.change(screen.getByLabelText('Key 1'), {
+    target: { value: 'first-key' },
+  })
+  fireEvent.change(screen.getByLabelText('Key 2'), {
+    target: { value: 'second-key' },
+  })
+  fireEvent.change(screen.getByLabelText('Remark for key 2'), {
+    target: { value: 'backup account' },
+  })
+
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel',
+      expect.objectContaining({
+        mode: 'multi_to_single',
+        key_remarks: { 1: 'backup account' },
       }),
       expect.anything()
     )
@@ -2000,6 +2400,86 @@ test('an operator without sensitive write permission can discover saved models a
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
 })
 
+// Editing a multi-key channel shows each saved key as its own row with its
+// remark; the edited rows are saved as the complete new list.
+test('multi-key editing shows saved keys one per row and saves the edited list', async () => {
+  editingChannel.channel_info = {
+    ...editingChannel.channel_info,
+    is_multi_key: true,
+    multi_key_size: 3,
+  }
+  vi.spyOn(api, 'post').mockImplementation(async (url) => {
+    if (url === '/api/channel/42/key') {
+      return {
+        data: {
+          success: true,
+          data: { key: 'sk-a\nsk-b\nsk-c', remarks: { 1: 'backup' } },
+        },
+      }
+    }
+    throw new Error(`Unexpected POST ${url}`)
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+
+  expect(await screen.findByLabelText('Key 1')).toHaveValue('sk-a')
+  expect(screen.getByLabelText('Key 2')).toHaveValue('sk-b')
+  expect(screen.getByLabelText('Remark for key 2')).toHaveValue('backup')
+  expect(screen.getByLabelText('Key 3')).toHaveValue('sk-c')
+  expect(
+    screen.queryByRole('combobox', { name: 'Key Update Mode' })
+  ).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole('button', { name: 'Delete key 1' }))
+  fireEvent.change(screen.getByLabelText('Remark for key 2'), {
+    target: { value: 'third' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(
+      '/api/channel/',
+      expect.objectContaining({
+        id: 42,
+        key: 'sk-b\nsk-c',
+        key_mode: 'replace',
+        key_remarks: { 0: 'backup', 1: 'third' },
+      }),
+      expect.anything()
+    )
+  )
+})
+
+test('multi-key editing saves nothing about keys when the rows are untouched', async () => {
+  editingChannel.channel_info = {
+    ...editingChannel.channel_info,
+    is_multi_key: true,
+    multi_key_size: 1,
+  }
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: { success: true, data: { key: 'sk-a', remarks: {} } },
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  expect(await screen.findByLabelText('Key 1')).toHaveValue('sk-a')
+
+  fireEvent.change(screen.getByLabelText('Name *'), {
+    target: { value: 'Renamed channel' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as Record<string, unknown>
+  expect(payload).not.toHaveProperty('key')
+  expect(payload).not.toHaveProperty('key_mode')
+})
+
 test.each([
   ['random', 'Random', 'polling', 'Polling'],
   ['polling', 'Polling', 'random', 'Random'],
@@ -2012,12 +2492,15 @@ test.each([
       multi_key_size: 2,
       multi_key_mode: initialMode,
     }
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: { key: 'key-one\nkey-two', remarks: {} } },
+    })
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true } })
     const user = userEvent.setup()
     render(<ConfigurationHarness currentRow={editingChannel} />)
-    await screen.findByDisplayValue('Existing channel')
+    await screen.findByLabelText('Key 2')
     const strategy = screen.getByRole('combobox', {
       name: 'Multi-Key Strategy',
     })
@@ -2050,8 +2533,10 @@ test('single-key editing omits the multi-key strategy control and update field',
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('multi_key_mode')
 })
 
+// When the saved keys cannot be loaded as rows, editing falls back to the
+// append/replace text field.
 test.each(['append', 'replace'])(
-  'multi-key editing submits the selected %s mode with new keys',
+  'multi-key editing without loaded keys submits the selected %s mode',
   async (mode) => {
     editingChannel = {
       ...editingChannel,
@@ -2061,6 +2546,9 @@ test.each(['append', 'replace'])(
         multi_key_size: 2,
       },
     }
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: false, message: 'Channel key unavailable' },
+    })
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true } })

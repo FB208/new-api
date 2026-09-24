@@ -104,7 +104,6 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { SecureVerificationDialog } from '@/features/auth/secure-verification'
 import { PluginIcon } from '@/features/task-plugins/components/plugin-icon'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
@@ -183,6 +182,12 @@ import {
   hasModelConfigChanged,
   findMissingModelsInMapping,
   validateModelMappingJson,
+  createKeyEntry,
+  parseKeyFieldValues,
+  resolveKeyEntryFormat,
+  toKeyEntriesPayload,
+  validateKeyEntry,
+  type KeyEntry,
 } from '../../lib'
 import {
   getChannelConfigurationSection,
@@ -222,6 +227,7 @@ import {
   type PassthroughKind,
 } from '../dialogs/passthrough-warning-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
+import { KeyEntriesEditor } from '../key-entries'
 import {
   ModelMappingBatchDialog,
   type ModelMappingBatchResult,
@@ -429,6 +435,10 @@ export function ChannelMutateDrawer({
   const initialModelsRef = useRef<string[]>([])
   const initialModelMappingRef = useRef<string>('')
   const initialStatusCodeMappingRef = useRef<string>('')
+  // Rows edited when creating a multi-key channel, mirrored into the `key` field.
+  const [keyEntries, setKeyEntries] = useState<KeyEntry[]>([])
+  // The key value the rows last wrote, to tell their writes from anyone else's.
+  const lastEmittedKeyRef = useRef<string | null>(null)
   const [statusCodeRiskOpen, setStatusCodeRiskOpen] = useState(false)
   const [statusCodeRiskDetailItems, setStatusCodeRiskDetailItems] = useState<
     string[]
@@ -560,8 +570,12 @@ export function ChannelMutateDrawer({
 
   const { copyToClipboard } = useCopyToClipboard()
 
-  const { channelKey, isChannelKeyLoading, handleRevealKey, verification } =
-    useChannelKeyDisclosure(open, channelId)
+  const {
+    channelKey,
+    channelKeyRemarks,
+    isChannelKeyLoading,
+    handleRevealKey,
+  } = useChannelKeyDisclosure(open, channelId)
 
   // Check if this is a multi-key channel
   const isMultiKeyChannel =
@@ -686,6 +700,19 @@ export function ChannelMutateDrawer({
   // Helper computed values
   const isBatchMode =
     multiKeyMode === 'batch' || multiKeyMode === 'multi_to_single'
+  // Only a multi-key channel gets the row editor: batch mode creates one
+  // channel per key, so its keys carry no per-key metadata. When editing, the
+  // rows are the saved keys, which only a user allowed to read them can load.
+  const editsSavedKeyRows =
+    isEditing && isMultiKeyChannel && canRevealChannelKey
+  const usesKeyEntriesEditor =
+    (!isEditing && multiKeyMode === 'multi_to_single') ||
+    (editsSavedKeyRows && channelKey !== null)
+  const keyEntryFormat = resolveKeyEntryFormat(
+    currentType,
+    awsKeyType,
+    vertexKeyType
+  )
   const isChannelDetailLoading = isEditing && isChannelLoading
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
@@ -1134,8 +1161,107 @@ export function ChannelMutateDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentBaseUrl])
 
+  // The flat key field stays the source of truth; the rows mirror it. They are
+  // rebuilt whenever the field holds a value the rows did not write (entering
+  // the mode, pasted connection info, an uploaded service account file,
+  // deduplication), otherwise the next row edit would overwrite that value with
+  // stale rows. Leaving the mode, including closing the drawer, drops the rows
+  // so credentials do not carry into the next creation session.
+  useEffect(() => {
+    if (!usesKeyEntriesEditor) {
+      lastEmittedKeyRef.current = null
+      setKeyEntries((previous) => (previous.length === 0 ? previous : []))
+      return
+    }
+    // When editing, rows come from the saved keys (loaded below) and the key
+    // field stays empty until a row changes, so an untouched save keeps them.
+    if (isEditing) return
+    const key = currentKey ?? ''
+    if (key === lastEmittedKeyRef.current) return
+    lastEmittedKeyRef.current = key
+    // Remarks belonged to the rows being replaced.
+    form.setValue('key_remarks', {})
+    const values = parseKeyFieldValues(key, keyEntryFormat)
+    setKeyEntries(
+      values.length > 0
+        ? values.map((value) => createKeyEntry(value))
+        : [createKeyEntry()]
+    )
+  }, [usesKeyEntriesEditor, isEditing, currentKey, keyEntryFormat, form])
+
+  // Editing a multi-key channel loads its saved keys once per opening, so they
+  // can be shown and edited one per row.
+  const autoLoadedKeyForRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!open) {
+      autoLoadedKeyForRef.current = null
+      return
+    }
+    if (!editsSavedKeyRows || autoLoadedKeyForRef.current === channelId) return
+    autoLoadedKeyForRef.current = channelId
+    void handleRevealKey({ quiet: true })
+  }, [open, editsSavedKeyRows, channelId, handleRevealKey])
+
+  useEffect(() => {
+    if (!editsSavedKeyRows || channelKey === null) return
+    const values = parseKeyFieldValues(channelKey, keyEntryFormat)
+    setKeyEntries(
+      values.map((value, index) =>
+        createKeyEntry(value, channelKeyRemarks?.[String(index)] ?? '')
+      )
+    )
+  }, [editsSavedKeyRows, channelKey, channelKeyRemarks, keyEntryFormat])
+
+  // The editor owns the rows; the form keeps holding the flat key string so
+  // validation, submission and every other key code path stay unchanged.
+  const handleKeyEntriesChange = (entries: KeyEntry[]) => {
+    setKeyEntries(entries)
+    const payload = toKeyEntriesPayload(entries, keyEntryFormat)
+    lastEmittedKeyRef.current = payload.key
+    form.setValue('key', payload.key, {
+      shouldDirty: true,
+      shouldValidate: true,
+    })
+    form.setValue('key_remarks', payload.remarks, { shouldDirty: true })
+    // Saved keys edited as rows are submitted as the complete new list.
+    if (isEditing) {
+      form.setValue('key_mode', 'replace')
+    }
+  }
+
   // Handle key deduplication
   const handleDeduplicateKeys = () => {
+    // With the row editor, dedupe the rows themselves so each kept key keeps its
+    // remark; rewriting the key field would rebuild the rows and drop them all.
+    if (usesKeyEntriesEditor) {
+      const seen = new Set<string>()
+      const deduplicated = keyEntries.filter((entry) => {
+        const value = entry.value.trim()
+        if (value === '' || !seen.has(value)) {
+          seen.add(value)
+          return true
+        }
+        return false
+      })
+      const removed = keyEntries.length - deduplicated.length
+      if (removed === 0) {
+        toast.info(t('No duplicate keys found'))
+        return
+      }
+      handleKeyEntriesChange(deduplicated)
+      toast.success(
+        t(
+          'Removed {{removed}} duplicate key(s). Before: {{before}}, After: {{after}}',
+          {
+            removed,
+            before: keyEntries.length,
+            after: deduplicated.length,
+          }
+        )
+      )
+      return
+    }
+
     const currentKey = form.getValues('key')
     if (!currentKey || currentKey.trim() === '') {
       toast.info(t('Please enter keys first'))
@@ -1615,6 +1741,41 @@ export function ChannelMutateDrawer({
         setPendingErrorFocus('key')
         return
       }
+      // The row editor flags a malformed row, but the flat key field is only
+      // checked for being non-empty, so a half-filled AWS row ("AK||") would
+      // otherwise be saved as a credential no request can use. Blank rows are
+      // dropped on serialization and need no check here.
+      if (
+        usesKeyEntriesEditor &&
+        keyEntries.some(
+          (entry) =>
+            entry.value.trim() !== '' &&
+            validateKeyEntry(entry, keyEntryFormat) !== null
+        )
+      ) {
+        form.setError('key', {
+          type: 'manual',
+          message: ERROR_MESSAGES.INVALID_KEY_ROWS,
+        })
+        setConfigurationSection('connection')
+        setPendingErrorFocus('key')
+        return
+      }
+      // Removing every saved row empties the key field, which an update reads
+      // as "keep the saved keys"; refuse rather than ignore the removal.
+      if (
+        isEditing &&
+        usesKeyEntriesEditor &&
+        !keyEntries.some((entry) => entry.value.trim() !== '')
+      ) {
+        form.setError('key', {
+          type: 'manual',
+          message: ERROR_MESSAGES.REQUIRED_KEY,
+        })
+        setConfigurationSection('connection')
+        setPendingErrorFocus('key')
+        return
+      }
 
       if (sensitiveLocked) {
         const dirtyFields = form.formState.dirtyFields as Partial<
@@ -1730,6 +1891,9 @@ export function ChannelMutateDrawer({
       sensitiveLocked,
       channelData,
       form,
+      usesKeyEntriesEditor,
+      keyEntries,
+      keyEntryFormat,
       confirmMissingModelMappings,
       confirmStatusCodeRisk,
       channelMutation,
@@ -4335,16 +4499,27 @@ export function ChannelMutateDrawer({
                   return (
                     <FormItem>
                       <FormLabel required>{t('API Key')}</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder={keyPlaceholder}
-                          rows={isBatchMode ? 8 : 4}
-                          {...field}
+                      {usesKeyEntriesEditor ? (
+                        <KeyEntriesEditor
+                          entries={keyEntries}
+                          onChange={handleKeyEntriesChange}
+                          format={keyEntryFormat}
+                          disabled={sensitiveLocked}
                         />
-                      </FormControl>
+                      ) : (
+                        <FormControl>
+                          <Textarea
+                            placeholder={keyPlaceholder}
+                            rows={isBatchMode ? 8 : 4}
+                            {...field}
+                          />
+                        </FormControl>
+                      )}
                       <FormDescription>
                         <span className='flex flex-col gap-2'>
-                          <span>{keyDescription}</span>
+                          {!usesKeyEntriesEditor && (
+                            <span>{keyDescription}</span>
+                          )}
                           {!isEditing && isBatchMode && (
                             <Button
                               type='button'
@@ -4359,61 +4534,66 @@ export function ChannelMutateDrawer({
                           )}
                         </span>
                       </FormDescription>
-                      {isEditing && canRevealChannelKey && (
-                        <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
-                          <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                            <div>
+                      {isEditing &&
+                        canRevealChannelKey &&
+                        !usesKeyEntriesEditor && (
+                          <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
+                            <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                               <p className='text-sm font-medium'>
                                 {t('Current key')}
                               </p>
-                              <p className='text-muted-foreground text-xs'>
-                                {t(
-                                  'Verification required to reveal the saved key.'
-                                )}
-                              </p>
+                              <div className='flex items-center gap-2'>
+                                <Button
+                                  type='button'
+                                  variant='outline'
+                                  size='sm'
+                                  onClick={() => handleRevealKey()}
+                                  disabled={isChannelKeyLoading}
+                                >
+                                  {isChannelKeyLoading ? (
+                                    <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                                  ) : (
+                                    <Eye className='mr-2 h-4 w-4' />
+                                  )}
+                                  {t('Reveal key')}
+                                </Button>
+                                <Button
+                                  type='button'
+                                  variant='ghost'
+                                  size='sm'
+                                  onClick={async () => {
+                                    if (channelKey) {
+                                      await copyToClipboard(channelKey)
+                                    }
+                                  }}
+                                  disabled={!channelKey}
+                                >
+                                  <Copy className='mr-2 h-4 w-4' />
+                                  {t('Copy')}
+                                </Button>
+                              </div>
                             </div>
-                            <div className='flex items-center gap-2'>
-                              <Button
-                                type='button'
-                                variant='outline'
-                                size='sm'
-                                onClick={handleRevealKey}
-                                disabled={
-                                  isChannelKeyLoading || verification.isActive
-                                }
-                              >
-                                {isChannelKeyLoading ||
-                                verification.isActive ? (
-                                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                                ) : (
-                                  <Eye className='mr-2 h-4 w-4' />
-                                )}
-                                {t('Reveal key')}
-                              </Button>
-                              <Button
-                                type='button'
-                                variant='ghost'
-                                size='sm'
-                                onClick={async () => {
-                                  if (channelKey) {
-                                    await copyToClipboard(channelKey)
-                                  }
-                                }}
-                                disabled={!channelKey}
-                              >
-                                <Copy className='mr-2 h-4 w-4' />
-                                {t('Copy')}
-                              </Button>
-                            </div>
+                            {/*
+                            A multi-key channel stores its keys newline-joined
+                            in one string. A single-line input swallows those
+                            newlines and renders every key run together, so the
+                            revealed value needs a multi-line field.
+                          */}
+                            <Textarea
+                              readOnly
+                              value={channelKey ?? ''}
+                              rows={Math.min(
+                                Math.max(
+                                  (channelKey ?? '').split('\n').length,
+                                  1
+                                ),
+                                8
+                              )}
+                              placeholder={t('Hidden')}
+                              className='font-mono text-xs'
+                            />
                           </div>
-                          <Input
-                            readOnly
-                            value={channelKey ?? ''}
-                            placeholder={t('Hidden — verify to reveal')}
-                            className='font-mono'
-                          />
-                        </div>
-                      )}
+                        )}
                       <FormMessage />
                     </FormItem>
                   )
@@ -4461,7 +4641,7 @@ export function ChannelMutateDrawer({
                 </div>
               )}
 
-              {isEditing && isMultiKeyChannel && (
+              {isEditing && isMultiKeyChannel && !usesKeyEntriesEditor && (
                 <FormField
                   control={form.control}
                   name='key_mode'
@@ -5032,8 +5212,6 @@ export function ChannelMutateDrawer({
           }}
         />
       )}
-
-      <SecureVerificationDialog {...verification.dialogProps} />
 
       {/* Missing Models Confirmation Dialog */}
       <MissingModelsConfirmationDialog

@@ -89,6 +89,9 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
             ? {
                 ...payload,
                 key_mode: data.key_mode,
+                // A replaced list carries its own remarks, indexed by the new keys.
+                key_remarks:
+                  data.key_mode === 'replace' ? data.key_remarks : undefined,
               }
             : payload
 

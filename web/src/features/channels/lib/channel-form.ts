@@ -254,6 +254,12 @@ export const channelFormSchema = z
       .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
     advanced_custom: z.string().optional(),
     other: z.string().optional(),
+    /**
+     * Per-key remarks for a multi-key channel, indexed against the key list in
+     * `key`. Filled by the structured key editor; the flat `key` string stays
+     * the source of truth for the key material itself.
+     */
+    key_remarks: z.record(z.string(), z.string()).optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
     multi_key_type: z.enum(['random', 'polling']).optional(),
@@ -838,6 +844,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
   mode: 'single' | 'batch' | 'multi_to_single'
   multi_key_mode?: 'random' | 'polling'
   batch_add_set_key_prefix_2_name?: boolean
+  key_remarks?: Record<string, string>
   channel: Partial<Channel>
 } {
   const mode = formData.multi_key_mode || 'single'
@@ -879,6 +886,10 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
       mode === 'multi_to_single' ? formData.multi_key_type : undefined,
     batch_add_set_key_prefix_2_name:
       mode === 'batch' ? formData.batch_add_set_key_prefix_2_name : undefined,
+    // Remarks only describe the keys of a single multi-key channel; batch mode
+    // creates one channel per key, where each channel has its own remark field.
+    key_remarks:
+      mode === 'multi_to_single' ? formData.key_remarks : undefined,
     channel,
   }
 }

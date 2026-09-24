@@ -233,6 +233,7 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  remark?: string
 }
 
 export type MultiKeyConfirmAction = {
@@ -320,10 +321,25 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'update_key'
+    | 'add_keys'
   key_index?: number
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled
+  /**
+   * update_key patches one key by index: only the fields present are changed.
+   * Patching per index rather than sending the whole list back keeps two
+   * concurrent editors from silently overwriting each other.
+   */
+  key?: string
+  remark?: string
+  keys?: MultiKeyAddInput[] // for add_keys
+}
+
+export interface MultiKeyAddInput {
+  key: string
+  remark: string
 }
 
 export interface BatchDeleteParams {
@@ -385,5 +401,7 @@ export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
   multi_key_mode?: 'random' | 'polling'
   batch_add_set_key_prefix_2_name?: boolean
+  /** Per-key remarks indexed against the key list; multi_to_single mode only. */
+  key_remarks?: Record<string, string>
   channel: Partial<Channel>
 }

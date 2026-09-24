@@ -20,9 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { useSecureVerification } from '@/features/auth/secure-verification'
 import { handleServerError } from '@/lib/handle-server-error'
-import { AuthOperationError } from '@/lib/secure-verification'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getChannelKey } from '../api'
@@ -32,12 +30,10 @@ export function useChannelKeyDisclosure(
   channelId: number | null
 ) {
   const { t } = useTranslation()
-  const verification = useSecureVerification()
-  const cancelVerification = verification.cancel
-  const requestVerification = verification.requestVerification
   const [disclosedKey, setDisclosedKey] = useState<{
     channelId: number
     key: string
+    remarks: Record<string, string>
   } | null>(null)
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
   const operation = useRef<AbortController | null>(null)
@@ -48,49 +44,50 @@ export function useChannelKeyDisclosure(
     return () => {
       operation.current?.abort()
       operation.current = null
-      cancelVerification()
     }
-  }, [open, channelId, cancelVerification])
+  }, [open, channelId])
 
-  const handleRevealKey = useCallback(async () => {
-    if (!channelId || !open || operation.current) return
-    const current = new AbortController()
-    operation.current = current
-    try {
-      const proof = await requestVerification({
-        scope: 'channel.key.read',
-        context: { channel_id: channelId },
-        title: t('Verify to view channel key'),
-        description: t(
-          'Use Passkey or 2FA to confirm your identity before revealing this channel key.'
-        ),
-      })
-      if (!proof || operation.current !== current) return
+  // quiet: the key was loaded automatically, not on request, so no toast.
+  const handleRevealKey = useCallback(
+    async (options?: { quiet?: boolean }) => {
+      if (!channelId || !open || operation.current) return
+      const current = new AbortController()
+      operation.current = current
       setIsChannelKeyLoading(true)
-      const res = await getChannelKey(
-        channelId,
-        proof.proof_token,
-        current.signal
-      )
-      if (operation.current !== current) return
-      if (!res.success) {
-        throw createServerError(res, t('Failed to fetch channel key'))
+      try {
+        const res = await getChannelKey(channelId, current.signal)
+        if (operation.current !== current) return
+        if (!res.success) {
+          throw createServerError(res, t('Failed to fetch channel key'))
+        }
+        setDisclosedKey({
+          channelId,
+          key: res.data?.key ?? '',
+          remarks: res.data?.remarks ?? {},
+        })
+        if (options?.quiet !== true) {
+          toast.success(t('Channel key unlocked'))
+        }
+      } catch (error) {
+        if (operation.current === current && !current.signal.aborted) {
+          handleServerError(error)
+        }
+      } finally {
+        if (operation.current === current) {
+          operation.current = null
+          setIsChannelKeyLoading(false)
+        }
       }
-      setDisclosedKey({ channelId, key: res.data?.key ?? '' })
-      toast.success(t('Channel key unlocked'))
-    } catch (error) {
-      if (operation.current === current && !current.signal.aborted) {
-        handleServerError(AuthOperationError.from(error))
-      }
-    } finally {
-      if (operation.current === current) {
-        operation.current = null
-        setIsChannelKeyLoading(false)
-      }
-    }
-  }, [channelId, open, requestVerification, t])
+    },
+    [channelId, open, t]
+  )
 
-  const channelKey =
-    open && disclosedKey?.channelId === channelId ? disclosedKey.key : null
-  return { channelKey, isChannelKeyLoading, handleRevealKey, verification }
+  const disclosed =
+    open && disclosedKey?.channelId === channelId ? disclosedKey : null
+  return {
+    channelKey: disclosed?.key ?? null,
+    channelKeyRemarks: disclosed?.remarks ?? null,
+    isChannelKeyLoading,
+    handleRevealKey,
+  }
 }

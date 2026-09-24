@@ -71,6 +71,7 @@ var channelSensitiveFields = map[string]struct{}{
 	"other":               {},
 	"settings":            {},
 	"key_mode":            {},
+	"key_remarks":         {},
 }
 
 // channelOperationalFields lists fields managed by operation endpoints instead
