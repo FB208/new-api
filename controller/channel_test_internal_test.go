@@ -6,22 +6,233 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/relay/channel/vertex"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
+
+type keyTestResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		Available bool    `json:"available"`
+		Message   string  `json:"message"`
+		Time      float64 `json:"time"`
+		Model     string  `json:"model"`
+	} `json:"data"`
+}
+
+// runKeyTest submits the real draft payload to the temporary test handler.
+func runKeyTest(t *testing.T, userID int, channel model.Channel) (*httptest.ResponseRecorder, keyTestResponse) {
+	t.Helper()
+	body, err := common.Marshal(map[string]any{"channel": channel})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("id", userID)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/test/key", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	TestChannelKey(c)
+	var response keyTestResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return recorder, response
+}
+
+// TestChannelKeyDraft verifies exact credential selection and non-persistence on real dialects.
+func TestChannelKeyDraft(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_")))
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+			// Isolated tables and a separately configured log handle keep existing data untouched.
+			db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "keytest_"}})
+			require.NoError(t, err)
+			logDB, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "keytest_log_"}})
+			require.NoError(t, err)
+			originalDB, originalLogDB := model.DB, model.LOG_DB
+			originalRedis, originalLogEnabled := common.RedisEnabled, common.LogConsumeEnabled
+			model.DB, model.LOG_DB = db, logDB
+			common.RedisEnabled, common.LogConsumeEnabled = false, true
+			t.Cleanup(func() {
+				require.NoError(t, db.Migrator().DropTable(&model.User{}, &model.Channel{}))
+				require.NoError(t, logDB.Migrator().DropTable(&model.Log{}))
+				for _, handle := range []*gorm.DB{db, logDB} {
+					sqlDB, err := handle.DB()
+					require.NoError(t, err)
+					require.NoError(t, sqlDB.Close())
+				}
+				model.DB, model.LOG_DB = originalDB, originalLogDB
+				common.RedisEnabled, common.LogConsumeEnabled = originalRedis, originalLogEnabled
+			})
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}))
+			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			versionSQL := "select version()"
+			if dialect == "sqlite" {
+				versionSQL = "select sqlite_version()"
+			}
+			var version string
+			require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
+			t.Logf("database: %s %s", dialect, version)
+			user := model.User{Username: "key-test-user", Role: common.RoleRootUser, Status: common.UserStatusEnabled, Group: "default", Quota: 1000}
+			require.NoError(t, db.Create(&user).Error)
+			stored := model.Channel{Type: constant.ChannelTypeOpenAI, Name: "saved", Key: "saved-one\nsaved-two", Models: "gpt-4o-mini", Status: common.ChannelStatusManuallyDisabled, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyPollingIndex: 1, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled, 1: common.ChannelStatusAutoDisabled}}}
+			require.NoError(t, db.Create(&stored).Error)
+			var before model.Channel
+			require.NoError(t, db.First(&before, stored.Id).Error)
+			service.InitHttpClient()
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				assert.Equal(t, "Bearer draft-key", r.Header.Get("Authorization"))
+				assert.Equal(t, "draft-header", r.Header.Get("X-Draft"))
+				var request map[string]any
+				assert.NoError(t, common.DecodeJson(r.Body, &request))
+				assert.Equal(t, "key-test-unpriced-model", request["model"])
+				assert.Equal(t, float64(12), request["max_tokens"])
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"test","object":"chat.completion","model":"key-test-unpriced-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer upstream.Close()
+			draft := stored
+			draft.Key = "draft-key"
+			draft.BaseURL = common.GetPointer(upstream.URL)
+			draft.Models = "alias"
+			draft.ModelMapping = common.GetPointer(`{"alias":"key-test-unpriced-model"}`)
+			draft.HeaderOverride = common.GetPointer(`{"X-Draft":"draft-header"}`)
+			draft.ParamOverride = common.GetPointer(`{"max_tokens":12}`)
+			for range 2 {
+				recorder, response := runKeyTest(t, user.Id, draft)
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+				require.True(t, response.Success)
+				require.True(t, response.Data.Available, response.Data.Message)
+				assert.Equal(t, "key-test-unpriced-model", response.Data.Model)
+				assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+			}
+			assert.EqualValues(t, 2, calls.Load())
+			var after model.Channel
+			require.NoError(t, db.First(&after, stored.Id).Error)
+			assert.Equal(t, before, after)
+			var logCount int64
+			require.NoError(t, logDB.Model(&model.Log{}).Count(&logCount).Error)
+			assert.Zero(t, logCount)
+			var channelCount int64
+			require.NoError(t, db.Model(&model.Channel{}).Count(&channelCount).Error)
+			assert.EqualValues(t, 1, channelCount)
+		})
+	}
+}
+
+// TestChannelKeyFailures covers malformed drafts, upstream errors and credential-cache isolation.
+func TestChannelKeyFailures(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	user := model.User{Username: "key-test-failures", Role: common.RoleRootUser, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+	service.InitHttpClient()
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"rejected draft-secret","type":"invalid_api_key"}}`))
+	}))
+	defer upstream.Close()
+	base := model.Channel{Type: constant.ChannelTypeOpenAI, Key: "draft-secret", Models: "gpt-4o-mini", BaseURL: common.GetPointer(upstream.URL)}
+	recorder, response := runKeyTest(t, user.Id, base)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.True(t, response.Success)
+	assert.False(t, response.Data.Available)
+	assert.Contains(t, response.Data.Message, "rejected")
+	assert.NotContains(t, recorder.Body.String(), base.Key)
+	for _, test := range []struct {
+		name   string
+		change func(*model.Channel)
+	}{
+		{"missing model", func(c *model.Channel) { c.Models = "" }},
+		{"missing key", func(c *model.Channel) { c.Key = "" }},
+		{"multiple keys", func(c *model.Channel) { c.Key = "one\ntwo" }},
+		{"invalid settings", func(c *model.Channel) { c.Setting = common.GetPointer("{") }},
+		{"invalid override", func(c *model.Channel) { c.HeaderOverride = common.GetPointer("[]") }},
+		{"invalid AWS key", func(c *model.Channel) { c.Type = constant.ChannelTypeAws }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			draft := base
+			test.change(&draft)
+			recorder, response := runKeyTest(t, user.Id, draft)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+			assert.False(t, response.Success)
+		})
+	}
+	for _, override := range []string{
+		`{"max_tokens":-1}`,
+		`{"max_completion_tokens":2147483648}`,
+		`{"max_output_tokens":"10"}`,
+		`{"generationConfig":{"maxOutputTokens":1.5}}`,
+		`{"n":129}`,
+	} {
+		t.Run(override, func(t *testing.T) {
+			draft := base
+			draft.ParamOverride = common.GetPointer(override)
+			_, response := runKeyTest(t, user.Id, draft)
+			assert.False(t, response.Data.Available)
+			assert.Contains(t, response.Data.Message, "invalid")
+		})
+	}
+	assert.EqualValues(t, 1, calls.Load(), "invalid drafts must not reach the upstream")
+	vertex.Cache.SetDefault("access-token-0", "must-not-use-this-cached-token")
+	t.Cleanup(func() { vertex.Cache.DeleteIf(func(key string) bool { return key == "access-token-0" }) })
+	draft := base
+	draft.Type = constant.ChannelTypeVertexAi
+	draft.Key = `{"project_id":"draft","client_email":"draft@example.test","private_key":"invalid-private-key"}`
+	draft.Models = "gemini-2.5-flash"
+	draft.Other = `{"default":"us-central1"}`
+	_, response = runKeyTest(t, user.Id, draft)
+	assert.False(t, response.Data.Available)
+	assert.Contains(t, response.Data.Message, "private key")
+	assert.NotContains(t, response.Data.Message, "invalid-private-key")
+
+	engine := gin.New()
+	engine.POST("/key", middleware.RequirePermission(authz.ChannelSensitiveWrite), TestChannelKey)
+	recorder = httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/key", strings.NewReader(`{}`)))
+	assert.Equal(t, http.StatusForbidden, recorder.Code)
+}
 
 func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
 	originalBaseURLs := constant.ChannelBaseURLs

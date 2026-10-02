@@ -154,6 +154,7 @@ import {
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../../constants'
 import { useChannelKeyDisclosure } from '../../hooks/use-channel-key-disclosure'
+import { useChannelKeyTest } from '../../hooks/use-channel-key-test'
 import {
   useChannelModelDiscovery,
   type ChannelModelDiscoveryRequest,
@@ -713,6 +714,14 @@ export function ChannelMutateDrawer({
     awsKeyType,
     vertexKeyType
   )
+  const keyTesting = useChannelKeyTest({
+    open,
+    channelId,
+    enabled: isEditing && usesKeyEntriesEditor && canEditSensitive,
+    entries: keyEntries,
+    format: keyEntryFormat,
+    values: formValues,
+  })
   const isChannelDetailLoading = isEditing && isChannelLoading
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
@@ -4505,6 +4514,16 @@ export function ChannelMutateDrawer({
                           onChange={handleKeyEntriesChange}
                           format={keyEntryFormat}
                           disabled={sensitiveLocked}
+                          testing={
+                            isEditing && canEditSensitive
+                              ? {
+                                  ...keyTesting,
+                                  onTest: (entryId) => {
+                                    void keyTesting.runTests(entryId)
+                                  },
+                                }
+                              : undefined
+                          }
                         />
                       ) : (
                         <FormControl>

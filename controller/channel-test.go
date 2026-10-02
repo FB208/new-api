@@ -69,7 +69,8 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
-func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+// testChannel runs a provider request; temporary tests never persist their result.
+func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, temporary bool) testResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -165,7 +166,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
-	group, _ := model.GetUserGroup(testUserID, false)
+	group := cache.Group
+	if !temporary {
+		group, _ = model.GetUserGroup(testUserID, false)
+	}
 	c.Set("group", group)
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
@@ -242,7 +246,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	info.IsChannelTest = true
 	info.InitChannelMeta(c)
 
-	err = attachTestBillingRequestInput(info, request)
+	if !temporary {
+		err = attachTestBillingRequestInput(info, request)
+	}
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -268,6 +274,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 
 	testModel = info.UpstreamModelName
+	c.Set("test_upstream_model", testModel)
 	// 更新请求中的模型名称
 	request.SetModelName(testModel)
 
@@ -292,9 +299,11 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	//// 创建一个用于日志的 info 副本，移除 ApiKey
 	//logInfo := info
 	//logInfo.ApiKey = ""
-	common.SysLog(fmt.Sprintf("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
-
-	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+	var priceData hosttypes.PriceData
+	if !temporary {
+		common.SysLog(fmt.Sprintf("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
+		priceData, err = helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+	}
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -432,6 +441,26 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 
 	requestBody := bytes.NewBuffer(jsonData)
+	if temporary {
+		// Overrides are part of the draft, so check quantities after applying them.
+		for _, path := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens", "generationConfig.maxOutputTokens", "generation_config.max_output_tokens"} {
+			value := gjson.GetBytes(jsonData, path)
+			if !value.Exists() || value.Type == gjson.Null {
+				continue
+			}
+			limit, parseErr := strconv.ParseUint(value.Raw, 10, 32)
+			tokens := uint(limit)
+			if parseErr != nil || helper.ExceedsMaxTokensLimit(&tokens) {
+				return testResult{context: c, localErr: fmt.Errorf("invalid %s", path)}
+			}
+		}
+		if value := gjson.GetBytes(jsonData, "n"); value.Exists() && value.Type != gjson.Null {
+			count, parseErr := strconv.ParseUint(value.Raw, 10, 32)
+			if parseErr != nil || count < 1 || count > uint64(dto.MaxImageN) {
+				return testResult{context: c, localErr: errors.New("invalid n")}
+			}
+		}
+	}
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
@@ -446,16 +475,18 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		httpResp = resp.(*http.Response)
 		if httpResp.StatusCode != http.StatusOK {
 			err := service.RelayErrorHandler(c.Request.Context(), httpResp, true)
-			common.SysError(fmt.Sprintf(
-				"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%v",
-				channel.Id,
-				channel.Name,
-				channel.Type,
-				testModel,
-				endpointType,
-				httpResp.StatusCode,
-				err,
-			))
+			if !temporary {
+				common.SysError(fmt.Sprintf(
+					"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%v",
+					channel.Id,
+					channel.Name,
+					channel.Type,
+					testModel,
+					endpointType,
+					httpResp.StatusCode,
+					err,
+				))
+			}
 			return testResult{
 				context:     c,
 				localErr:    err,
@@ -471,12 +502,15 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: respErr,
 		}
 	}
-	usage, usageErr := coerceTestUsage(usageA, isStream, info.GetEstimatePromptTokens())
-	if usageErr != nil {
-		return testResult{
-			context:     c,
-			localErr:    usageErr,
-			newAPIError: types.NewOpenAIError(usageErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+	var usage *dto.Usage
+	if !temporary {
+		var usageErr error
+		usage, usageErr = coerceTestUsage(usageA, isStream, info.GetEstimatePromptTokens())
+		if usageErr != nil {
+			return testResult{
+				context: c, localErr: usageErr,
+				newAPIError: types.NewOpenAIError(usageErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+			}
 		}
 	}
 	result := w.Result()
@@ -494,6 +528,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			localErr:    bodyErr,
 			newAPIError: types.NewOpenAIError(bodyErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
+	}
+	if temporary {
+		return testResult{context: c}
 	}
 	info.SetEstimatePromptTokens(usage.PromptTokens)
 
@@ -842,6 +879,126 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	return testRequest
 }
 
+// TestChannelKey tests one supplied credential against an unsaved channel draft.
+func TestChannelKey(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	if c.ContentType() != "application/json" {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"success": false, "message": "JSON request required"})
+		return
+	}
+	var request struct {
+		Channel model.Channel `json:"channel"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid request"})
+		return
+	}
+	input := request.Channel
+	// Copy only connection fields: client IDs, status and polling state cannot enter the test.
+	channel := &model.Channel{
+		Type: input.Type, Key: strings.TrimSpace(input.Key), BaseURL: input.BaseURL,
+		OpenAIOrganization: input.OpenAIOrganization, Models: input.Models, TestModel: input.TestModel,
+		ModelMapping: input.ModelMapping, StatusCodeMapping: input.StatusCodeMapping,
+		Setting: input.Setting, OtherSettings: input.OtherSettings, Other: input.Other,
+		ParamOverride: input.ParamOverride, HeaderOverride: input.HeaderOverride,
+	}
+	if channel.Type <= 0 || channel.Type >= len(constant.ChannelBaseURLs) || channel.Key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Channel type and key are required"})
+		return
+	}
+	if err := validateChannel(channel, false); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": maskKeyTestError(err.Error(), channel.Key)})
+		return
+	}
+	key, err := normalizeMultiKeyValue(channel, channel.Key)
+	if err != nil || key == "null" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid key format"})
+		return
+	}
+	channel.Key = key
+	if channel.Type == constant.ChannelTypeAws {
+		parts := strings.Split(key, "|")
+		want := 3
+		if channel.GetOtherSettings().AwsKeyType == dto.AwsKeyTypeApiKey {
+			want = 2
+		}
+		valid := len(parts) == want
+		for _, part := range parts {
+			valid = valid && strings.TrimSpace(part) != ""
+		}
+		if !valid {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid AWS key format"})
+			return
+		}
+	}
+	for _, config := range []*string{channel.ModelMapping, channel.StatusCodeMapping, channel.ParamOverride, channel.HeaderOverride} {
+		if config == nil || strings.TrimSpace(*config) == "" {
+			continue
+		}
+		var object map[string]any
+		if err := common.UnmarshalJsonStr(*config, &object); err != nil || object == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid channel mapping or override JSON"})
+			return
+		}
+	}
+	testModel := strings.TrimSpace(lo.FromPtr(channel.TestModel))
+	if testModel == "" {
+		first, _, _ := strings.Cut(channel.Models, ",")
+		testModel = strings.TrimSpace(first)
+	}
+	if testModel == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Configure a test model or add a model first"})
+		return
+	}
+	userID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	start := time.Now()
+	result := testChannel(c.Request.Context(), channel, userID, testModel, "", shouldUseStreamForAutomaticChannelTest(channel), true)
+	message := ""
+	if result.localErr != nil {
+		message = maskKeyTestError(result.localErr.Error(), channel.Key)
+	} else if result.newAPIError != nil {
+		message = maskKeyTestError(result.newAPIError.Error(), channel.Key)
+	}
+	upstreamModel := testModel
+	if result.context != nil {
+		if mapped := result.context.GetString("test_upstream_model"); mapped != "" {
+			upstreamModel = mapped
+		}
+	}
+	// The audit middleware records only the API operation, not data or key health.
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"available": message == "", "message": message,
+		"time": time.Since(start).Seconds(), "model": upstreamModel,
+	}})
+}
+
+// maskKeyTestError removes supplied credentials even when an upstream echoes them.
+func maskKeyTestError(message, key string) string {
+	secrets := []string{key}
+	if strings.HasPrefix(key, "{") {
+		var credential map[string]any
+		if common.UnmarshalJsonStr(key, &credential) == nil {
+			for _, value := range credential {
+				if secret, ok := value.(string); ok {
+					secrets = append(secrets, secret)
+				}
+			}
+		}
+	} else {
+		secrets = append(secrets, strings.Split(key, "|")...)
+	}
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+		}
+	}
+	return common.MaskSensitiveInfo(message)
+}
+
 func TestChannel(c *gin.Context) {
 	channelId, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -874,7 +1031,7 @@ func TestChannel(c *gin.Context) {
 	if c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
-	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream, false)
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,
@@ -921,7 +1078,7 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	summary := channelTestSummary{}
 	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
 	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel), false)
 	milliseconds := time.Since(tik).Milliseconds()
 	if ctx.Err() != nil {
 		return summary

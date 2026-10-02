@@ -29,6 +29,8 @@ import type {
   ChannelBalanceResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
+  ChannelKeyTestConfig,
+  ChannelKeyTestResponse,
   CopyChannelParams,
   CopyChannelResponse,
   FetchModelsResponse,
@@ -271,6 +273,19 @@ export async function testChannel(
     channelActionConfig({ params })
   )
   return res.data
+}
+
+/** Test only the supplied key and draft; no channel is saved by this request. */
+export async function testChannelKey(
+  channel: ChannelKeyTestConfig & { key: string },
+  signal: AbortSignal
+): Promise<ChannelKeyTestResponse> {
+  const res = await api.post<{
+    success: boolean
+    message?: string
+    data: ChannelKeyTestResponse
+  }>('/api/channel/test/key', { channel }, channelActionConfig({ signal }))
+  return requireServerSuccess(res.data).data
 }
 
 /**

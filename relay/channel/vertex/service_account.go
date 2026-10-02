@@ -37,6 +37,7 @@ var Cache = asynccache.NewAsyncCache(asynccache.Options{
 	},
 })
 
+// getAccessToken bypasses the channel cache for unsaved credentials (channel ID 0).
 func getAccessToken(a *Adaptor, info *relaycommon.RelayInfo) (string, error) {
 	var cacheKey string
 	if info.ChannelIsMultiKey {
@@ -44,9 +45,10 @@ func getAccessToken(a *Adaptor, info *relaycommon.RelayInfo) (string, error) {
 	} else {
 		cacheKey = fmt.Sprintf("access-token-%d", info.ChannelId)
 	}
-	val, err := Cache.Get(cacheKey)
-	if err == nil {
-		return val.(string), nil
+	if info.ChannelId > 0 {
+		if val, err := Cache.Get(cacheKey); err == nil {
+			return val.(string), nil
+		}
 	}
 
 	signedJWT, err := createSignedJWT(a.AccountCredentials.ClientEmail, a.AccountCredentials.PrivateKey)
@@ -57,8 +59,8 @@ func getAccessToken(a *Adaptor, info *relaycommon.RelayInfo) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to exchange JWT for access token: %w", err)
 	}
-	if err := Cache.SetDefault(cacheKey, newToken); err {
-		return newToken, nil
+	if info.ChannelId > 0 {
+		Cache.SetDefault(cacheKey, newToken)
 	}
 	return newToken, nil
 }

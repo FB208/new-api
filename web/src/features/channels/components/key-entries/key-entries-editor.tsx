@@ -23,6 +23,8 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber } from '@/lib/format'
 
 import {
   createKeyEntry,
@@ -31,6 +33,7 @@ import {
   type KeyEntry,
   type KeyEntryFormat,
 } from '../../lib/key-entry-serialization'
+import type { ChannelKeyTestProgress, ChannelKeyTestResult } from '../../types'
 import { KeyEntryRow } from './key-entry-row'
 
 type KeyEntriesEditorProps = {
@@ -38,10 +41,18 @@ type KeyEntriesEditorProps = {
   onChange: (entries: KeyEntry[]) => void
   format: KeyEntryFormat
   disabled?: boolean
+  testing?: {
+    results: Record<string, ChannelKeyTestResult>
+    progress: ChannelKeyTestProgress | null
+    isTesting: boolean
+    model: string
+    onTest: (entryId?: string) => void
+  }
 }
 
 export function KeyEntriesEditor(props: KeyEntriesEditorProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const fieldPrefix = useId()
   const [bulkText, setBulkText] = useState('')
   const pendingFocusRef = useRef<string | null>(null)
@@ -120,6 +131,51 @@ export function KeyEntriesEditor(props: KeyEntriesEditorProps) {
         </TabsTrigger>
       </TabsList>
 
+      {props.testing && (
+        <div className='flex flex-col gap-2 py-2'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={
+                props.disabled ||
+                props.testing.isTesting ||
+                !props.testing.model ||
+                props.entries.length === 0
+              }
+              onClick={() => props.testing?.onTest()}
+            >
+              {t('Test all keys')}
+            </Button>
+            <span className='text-muted-foreground min-w-0 text-xs break-all'>
+              {props.testing.model
+                ? t('Test model: {{model}}', { model: props.testing.model })
+                : t('Configure a test model or add a model first')}
+            </span>
+          </div>
+          {props.testing.progress && (
+            <p role='status' className='text-muted-foreground text-xs'>
+              {t(
+                'Tested {{completed}}/{{total}} · Success {{succeeded}} · Failed {{failed}}',
+                {
+                  completed: formatNumber(
+                    props.testing.progress.completed,
+                    locale
+                  ),
+                  total: formatNumber(props.testing.progress.total, locale),
+                  succeeded: formatNumber(
+                    props.testing.progress.succeeded,
+                    locale
+                  ),
+                  failed: formatNumber(props.testing.progress.failed, locale),
+                }
+              )}
+            </p>
+          )}
+        </div>
+      )}
+
       <TabsContent value='rows' className='flex flex-col gap-2'>
         {props.entries.length === 0 ? (
           <div className='text-muted-foreground flex h-24 items-center justify-center rounded-md border border-dashed text-sm'>
@@ -138,6 +194,15 @@ export function KeyEntriesEditor(props: KeyEntriesEditorProps) {
               onValueChange={(value) => handleRowChange(entry.id, { value })}
               onRemarkChange={(remark) => handleRowChange(entry.id, { remark })}
               onRemove={() => handleRemoveRow(entry.id)}
+              onTest={
+                props.testing
+                  ? () => props.testing?.onTest(entry.id)
+                  : undefined
+              }
+              testingDisabled={
+                props.testing?.isTesting || !props.testing?.model
+              }
+              testResult={props.testing?.results[entry.id]}
             />
           ))
         )}

@@ -21,7 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { createInstance, type i18n as I18nInstance } from 'i18next'
 import { useState } from 'react'
 import { I18nextProvider } from 'react-i18next'
-import { beforeAll, expect, test } from 'vitest'
+import { beforeAll, expect, test, vi } from 'vitest'
 
 import en from '@/i18n/locales/en.json'
 
@@ -60,6 +60,37 @@ function EditorHarness(props: {
     </I18nextProvider>
   )
 }
+
+test('test actions address the stable row and remain available by keyboard without submitting the channel form', async () => {
+  const entries = [createKeyEntry('first'), createKeyEntry('second')]
+  const onTest = vi.fn()
+  const onSubmit = vi.fn((event) => event.preventDefault())
+  render(
+    <I18nextProvider i18n={i18n}>
+      <form onSubmit={onSubmit}>
+        <KeyEntriesEditor
+          entries={entries}
+          format='plain'
+          onChange={() => {}}
+          testing={{
+            results: {},
+            progress: null,
+            isTesting: false,
+            model: 'test-model',
+            onTest,
+          }}
+        />
+      </form>
+    </I18nextProvider>
+  )
+  const user = userEvent.setup()
+  screen.getByRole('button', { name: 'Test key 2' }).focus()
+  await user.keyboard('{Enter}')
+  expect(onTest).toHaveBeenCalledWith(entries[1].id)
+  await user.click(screen.getByRole('button', { name: 'Test all keys' }))
+  expect(onTest).toHaveBeenLastCalledWith()
+  expect(onSubmit).not.toHaveBeenCalled()
+})
 
 test('an empty list explains how to get started instead of rendering a blank area', () => {
   render(<EditorHarness initial={[]} />)

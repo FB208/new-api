@@ -19,15 +19,20 @@ For commercial licensing, please contact support@quantumnous.com
 import { Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { LoadingState } from '@/components/loading-state'
+import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber } from '@/lib/format'
 
 import {
   KEY_REMARK_MAX_LENGTH,
   type KeyEntry,
   type KeyEntryFormat,
 } from '../../lib/key-entry-serialization'
+import type { ChannelKeyTestResult } from '../../types'
 import { AwsKeyInputs } from './aws-key-inputs'
 
 const REMARK_TOO_LONG = 'Remark must not exceed {{max}} characters'
@@ -42,10 +47,14 @@ type KeyEntryRowProps = {
   onRemarkChange: (remark: string) => void
   onRemove: () => void
   inputId: string
+  onTest?: () => void
+  testingDisabled?: boolean
+  testResult?: ChannelKeyTestResult
 }
 
 export function KeyEntryRow(props: KeyEntryRowProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const remarkInvalid = props.error === REMARK_TOO_LONG
 
   return (
@@ -63,22 +72,77 @@ export function KeyEntryRow(props: KeyEntryRowProps) {
             number: props.index + 1,
           })}
         />
-        <Button
-          type='button'
-          variant='ghost'
-          size='icon'
-          onClick={props.onRemove}
-          disabled={props.disabled}
-          className='h-9 w-9'
-          aria-label={t('Delete key {{number}}', { number: props.index + 1 })}
-        >
-          <Trash2 className='h-4 w-4' aria-hidden='true' />
-        </Button>
+        <div className='flex items-center gap-1'>
+          {props.onTest && (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={props.onTest}
+              disabled={props.disabled || props.testingDisabled}
+              aria-label={t('Test key {{number}}', { number: props.index + 1 })}
+            >
+              {t('Test key')}
+            </Button>
+          )}
+          <Button
+            type='button'
+            variant='ghost'
+            size='icon'
+            onClick={props.onRemove}
+            disabled={props.disabled}
+            className='h-9 w-9'
+            aria-label={t('Delete key {{number}}', { number: props.index + 1 })}
+          >
+            <Trash2 className='h-4 w-4' aria-hidden='true' />
+          </Button>
+        </div>
       </div>
       {props.error && (
         <p role='alert' className='text-destructive text-xs'>
           {t(props.error, { max: KEY_REMARK_MAX_LENGTH })}
         </p>
+      )}
+      {props.testResult && (
+        <div
+          role='status'
+          className='flex min-w-0 flex-wrap items-center gap-2 text-xs'
+        >
+          {props.testResult.status === 'testing' && (
+            <LoadingState inline size='sm' message={t('Testing...')} />
+          )}
+          {props.testResult.status === 'pending' && (
+            <span className='text-muted-foreground'>
+              {t('Waiting to test')}
+            </span>
+          )}
+          {props.testResult.status === 'success' && (
+            <>
+              <StatusBadge
+                copyable={false}
+                variant='success'
+                label={t('Success')}
+              />
+              <span>
+                {t('Test time: {{time}} s', {
+                  time: formatNumber(props.testResult.time, locale),
+                })}
+              </span>
+            </>
+          )}
+          {props.testResult.status === 'error' && (
+            <>
+              <StatusBadge
+                copyable={false}
+                variant='danger'
+                label={t('Failed')}
+              />
+              <span className='text-destructive min-w-0 basis-full break-words whitespace-pre-wrap'>
+                {props.testResult.message || t('Test failed')}
+              </span>
+            </>
+          )}
+        </div>
       )}
     </div>
   )

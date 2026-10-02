@@ -306,6 +306,44 @@ export interface ChannelTestParams {
   test_model?: string
 }
 
+/** Only the current connection settings needed to test one unsaved key. */
+export type ChannelKeyTestConfig = Pick<
+  Channel,
+  | 'type'
+  | 'base_url'
+  | 'openai_organization'
+  | 'models'
+  | 'test_model'
+  | 'model_mapping'
+  | 'status_code_mapping'
+  | 'setting'
+  | 'settings'
+  | 'other'
+  | 'param_override'
+  | 'header_override'
+>
+
+export interface ChannelKeyTestResponse {
+  available: boolean
+  message: string
+  time: number
+  model: string
+}
+
+export interface ChannelKeyTestResult {
+  status: 'pending' | 'testing' | 'success' | 'error'
+  message?: string
+  time?: number
+  model?: string
+}
+
+export interface ChannelKeyTestProgress {
+  total: number
+  completed: number
+  succeeded: number
+  failed: number
+}
+
 export interface CopyChannelParams {
   suffix?: string
   reset_balance?: boolean
