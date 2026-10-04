@@ -26,8 +26,10 @@ import { z } from 'zod'
  * Bound channel information
  */
 export interface BoundChannel {
+  id: number
   name: string
   type: number
+  priority: number
 }
 
 /**
@@ -212,6 +214,7 @@ export type MetadataSyncSource = {
 export type MetadataSyncPreview = {
   source: MetadataSyncSource
   candidates: MetadataSyncCandidate[]
+  enabled_models: string[]
 }
 export type MetadataSyncSelection = {
   model_name: string

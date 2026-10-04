@@ -40,6 +40,7 @@ const route = getRouteApi('/_authenticated/models/$section')
 
 export function ModelsTable() {
   const { t } = useTranslation()
+  const navigate = route.useNavigate()
   const { selectedVendor } = useModels()
   const isMobile = useMediaQuery('(max-width: 640px)')
 
@@ -54,7 +55,22 @@ export function ModelsTable() {
     ensurePageInRange,
   } = useTableUrlState({
     search: route.useSearch(),
-    navigate: route.useNavigate(),
+    navigate: (options) =>
+      navigate({
+        ...options,
+        search: (previous) => {
+          if (options.search === true) return previous
+          const next =
+            typeof options.search === 'function'
+              ? options.search(previous)
+              : options.search
+          // Preserve an explicit empty selection instead of restoring the default.
+          return {
+            ...next,
+            square_state: (next.square_state ?? []) as ModelSquareState[],
+          }
+        },
+      }),
     pagination: {
       defaultPage: 1,
       defaultPageSize: isMobile ? 10 : DEFAULT_PAGE_SIZE,

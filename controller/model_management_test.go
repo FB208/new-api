@@ -490,6 +490,42 @@ export function parseTaskResult() { return {}; }
 			}
 			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
 
+			t.Run("bound_channel_priority", func(t *testing.T) {
+				priority := int64(10)
+				primary := model.Channel{Name: "Priority primary", Type: 1, Status: common.ChannelStatusEnabled, Models: "priority-first,priority-second", Group: "default,premium", Priority: &priority}
+				secondary := model.Channel{Name: "Priority secondary", Type: 1, Status: common.ChannelStatusEnabled, Models: primary.Models, Group: "default"}
+				require.NoError(t, primary.Insert())
+				require.NoError(t, secondary.Insert())
+				metadata := []*model.Model{{ModelName: "priority-first"}, {ModelName: "priority-second"}}
+				for _, item := range metadata {
+					require.NoError(t, item.Insert())
+				}
+
+				for _, value := range []int64{10, -2, 0} {
+					var update struct {
+						Success bool `json:"success"`
+					}
+					response := modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel/", map[string]any{"id": primary.Id, "priority": value}, &update)
+					require.True(t, update.Success, response.Body.String())
+					for _, item := range metadata {
+						var result struct {
+							Success bool        `json:"success"`
+							Data    model.Model `json:"data"`
+						}
+						response = modelManagementRequest(t, func(c *gin.Context) {
+							c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(item.Id)}}
+							GetModelMeta(c)
+						}, http.MethodGet, "/api/models/"+strconv.Itoa(item.Id), nil, &result)
+						require.True(t, result.Success, response.Body.String())
+						assert.Equal(t, []model.BoundChannel{
+							{Id: primary.Id, Name: primary.Name, Type: 1, Priority: value},
+							{Id: secondary.Id, Name: secondary.Name, Type: 1, Priority: 0},
+						}, result.Data.BoundChannels)
+						assert.Contains(t, response.Body.String(), `"priority":0`, "zero priorities must remain present in the response")
+					}
+				}
+			})
+
 			t.Run("square_states_follow_catalog_policy", func(t *testing.T) {
 				records := []model.Model{
 					{ModelName: "square-visible", Status: 1},
@@ -920,7 +956,7 @@ export function parseTaskResult() { return {}; }
 				rule := &model.Model{ModelName: "matrix-hidden-", NameRule: model.NameRulePrefix}
 				enrichModels([]*model.Model{exact, rule})
 				assert.Equal(t, []string{"available"}, exact.EnableGroups)
-				assert.Equal(t, []model.BoundChannel{{Name: "Active route", Type: 1}}, exact.BoundChannels)
+				assert.Equal(t, []model.BoundChannel{{Id: active.Id, Name: "Active route", Type: 1, Priority: 0}}, exact.BoundChannels)
 				assert.Equal(t, []string{"matrix-hidden-unpriced"}, rule.MatchedModels)
 				assert.Empty(t, exact.Endpoints, "inferred endpoints must not become stored configuration")
 				priceBefore, err := model.GetModelPricingSnapshot([]string{"matrix-hidden-unpriced"})

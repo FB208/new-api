@@ -22,12 +22,29 @@ import { StaticDataTable } from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
+import { ChannelFieldCell } from '@/features/channels/components/channel-field-cell'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { Model } from '../types'
 import { ModelSquareStatus } from './model-square-status'
 
-export function ModelConnections(props: { model: Model }) {
+// Show enabled model connections and allow authorized channel priority updates.
+export function ModelConnections(props: {
+  model: Model
+  onPrioritySaved: (channelId: number, priority: number) => void
+}) {
   const { t } = useTranslation()
+  const user = useAuthStore((state) => state.auth.user)
+  const canEdit = hasPermission(
+    user,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.WRITE
+  )
   return (
     <div className='min-h-0 flex-1 space-y-6 overflow-auto p-4'>
       <p className='text-muted-foreground text-sm'>
@@ -41,6 +58,7 @@ export function ModelConnections(props: { model: Model }) {
         {props.model.bound_channels?.length ? (
           <StaticDataTable
             data={props.model.bound_channels}
+            getRowKey={(channel) => channel.id}
             columns={[
               {
                 id: 'name',
@@ -51,6 +69,22 @@ export function ModelConnections(props: { model: Model }) {
                 id: 'type',
                 header: t('Type'),
                 cell: (channel) => channel.type,
+              },
+              {
+                id: 'priority',
+                header: t('Priority'),
+                cell: (channel) => (
+                  <ChannelFieldCell
+                    channelId={channel.id}
+                    value={channel.priority}
+                    field='priority'
+                    min={-999}
+                    disabled={!canEdit}
+                    onSuccess={(priority) =>
+                      props.onPrioritySaved(channel.id, priority)
+                    }
+                  />
+                ),
               },
             ]}
           />

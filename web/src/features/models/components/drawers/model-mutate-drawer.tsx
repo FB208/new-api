@@ -112,6 +112,10 @@ export function ModelMutateDrawer(props: {
     null
   )
   const [closeConfirm, setCloseConfirm] = useState(false)
+  const [savedPriorities, setSavedPriorities] = useState<{
+    source: Model | null | undefined
+    values: Record<number, number>
+  } | null>(null)
   const loadedKey = useRef('')
   const form = useForm({
     resolver: zodResolver(modelFormSchema),
@@ -154,6 +158,7 @@ export function ModelMutateDrawer(props: {
     setPricingDirty(false)
     setPendingPricingName(null)
     setCloseConfirm(false)
+    setSavedPriorities(null)
   }, [
     props.open,
     props.initialSection,
@@ -680,7 +685,33 @@ export function ModelMutateDrawer(props: {
             </div>
           )}
           {props.open && section === 'connections' && savedModel && (
-            <ModelConnections model={savedModel} />
+            <ModelConnections
+              model={{
+                ...savedModel,
+                bound_channels: savedModel.bound_channels?.map((channel) => ({
+                  ...channel,
+                  priority:
+                    savedPriorities && savedPriorities.source === currentRow
+                      ? (savedPriorities.values[channel.id] ?? channel.priority)
+                      : channel.priority,
+                })),
+              }}
+              onPrioritySaved={(channelId, priority) => {
+                // Keep channel-only models current across tabs without creating metadata.
+                setSavedPriorities((previous) => ({
+                  source: currentRow,
+                  values: {
+                    ...(previous && previous.source === currentRow
+                      ? previous.values
+                      : {}),
+                    [channelId]: priority,
+                  },
+                }))
+                void queryClient.invalidateQueries({
+                  queryKey: modelsQueryKeys.all,
+                })
+              }}
+            />
           )}
         </SheetContent>
       </Sheet>

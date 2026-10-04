@@ -27,7 +27,7 @@ import {
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
-import { useState, useMemo, useContext, useEffect } from 'react'
+import { useState, useMemo, useContext } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -77,14 +77,13 @@ import {
   parseGroupsList,
   parseChannelSettings,
   channelsQueryKeys,
-  handleUpdateChannelField,
   handleUpdateTagField,
-  createChannelFieldUpdateScheduler,
   isTagAggregateRow,
   type TagRow,
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
+import { ChannelFieldCell } from './channel-field-cell'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -233,38 +232,6 @@ function TagPriorityCell({ channel }: { channel: TagRow }) {
         }}
       />
     </>
-  )
-}
-
-function ChannelFieldCell({
-  channelId,
-  value,
-  field,
-  min,
-}: {
-  channelId: number
-  value: number | null | undefined
-  field: 'priority' | 'weight'
-  min: number
-}) {
-  const queryClient = useQueryClient()
-  const fieldUpdateScheduler = useMemo(
-    () =>
-      createChannelFieldUpdateScheduler((nextValue) => {
-        void handleUpdateChannelField(channelId, field, nextValue, queryClient)
-      }),
-    [channelId, field, queryClient]
-  )
-
-  useEffect(() => () => fieldUpdateScheduler.flush(), [fieldUpdateScheduler])
-
-  return (
-    <NumericSpinnerInput
-      value={value ?? 0}
-      onChange={fieldUpdateScheduler.schedule}
-      onCommit={fieldUpdateScheduler.flush}
-      min={min}
-    />
   )
 }
 

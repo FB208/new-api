@@ -314,6 +314,7 @@ func fetchMetadataCatalog(c *gin.Context, locale string) (metadataSyncSource, ma
 	return source, models, vendors, nil
 }
 
+// SyncUpstreamPreview returns metadata changes and enabled channel models for default selection.
 func SyncUpstreamPreview(c *gin.Context) {
 	source, upstream, upstreamVendors, err := fetchMetadataCatalog(c, c.Query("locale"))
 	if err != nil {
@@ -325,18 +326,27 @@ func SyncUpstreamPreview(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	missing, err := model.GetMissingModels()
+	connections, err := model.GetModelConnections()
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	enabledNames := make(map[string]bool)
+	for _, connection := range connections {
+		enabledNames[connection.Model] = true
+	}
+	enabledModels := make([]string, 0, len(enabledNames))
+	for name := range enabledNames {
+		enabledModels = append(enabledModels, name)
+	}
+	sort.Strings(enabledModels)
 	siteNames := make(map[string]bool)
 	allNames := make(map[string]bool)
 	for name := range locals {
 		siteNames[name] = true
 		allNames[name] = true
 	}
-	for _, name := range missing {
+	for _, name := range enabledModels {
 		siteNames[name] = true
 		allNames[name] = true
 	}
@@ -407,7 +417,7 @@ func SyncUpstreamPreview(c *gin.Context) {
 		}
 		candidates = append(candidates, candidate)
 	}
-	common.ApiSuccess(c, gin.H{"source": source, "candidates": candidates})
+	common.ApiSuccess(c, gin.H{"source": source, "candidates": candidates, "enabled_models": enabledModels})
 }
 
 func SyncUpstreamModels(c *gin.Context) {

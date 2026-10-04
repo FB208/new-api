@@ -111,6 +111,18 @@ export function SyncWizardDialog(props: {
     },
     onSuccess: (data) => {
       setPreview(data)
+      // Preselect exact matches for enabled channel models across all pages.
+      const enabledModels = new Set(data.enabled_models)
+      setSelection(
+        Object.fromEntries(
+          data.candidates
+            .filter(
+              (item) =>
+                enabledModels.has(item.model_name) && isMetadataSyncable(item)
+            )
+            .map((item) => [item.model_name, []])
+        )
+      )
     },
     onError: (error) => handleServerError(error),
   })

@@ -28,8 +28,10 @@ const (
 )
 
 type BoundChannel struct {
-	Name string `json:"name"`
-	Type int    `json:"type"`
+	Id       int    `json:"id"`
+	Name     string `json:"name"`
+	Type     int    `json:"type"`
+	Priority int64  `json:"priority"`
 }
 
 type Model struct {

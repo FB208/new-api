@@ -18,9 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Row } from '@tanstack/react-table'
-import { render, screen, waitFor, cleanup, act } from '@testing-library/react'
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  act,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AxiosError } from 'axios'
+import { toast } from 'sonner'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { pricingOptions } from '@/features/model-pricing/pricing'
@@ -564,6 +572,154 @@ describe('metadata editing', () => {
     expect(screen.getByLabelText('Description')).toHaveValue(
       'Unsaved metadata draft'
     )
+    client.clear()
+  })
+})
+
+// Provide real drawer/query behavior with only the channel HTTP boundary mocked.
+function renderPriorityEditor(id = 7, canEdit = true) {
+  let storedModel: Model = {
+    ...model,
+    id,
+    bound_channels: [
+      { id: 101, name: 'OP_Luna', type: 1, priority: 10 },
+      { id: 202, name: 'zenmux', type: 1, priority: 0 },
+    ],
+  }
+  const initialModel = storedModel
+  useAuthStore.getState().auth.setUser({
+    id: 2,
+    username: 'admin',
+    role: 10,
+    permissions: { admin_permissions: { channel: { write: canEdit } } },
+  })
+  const get = vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data: url === `/api/models/${id}` ? storedModel : { items: [] },
+    },
+  }))
+  const put = vi.spyOn(api, 'put').mockImplementation(async (_url, data) => {
+    const update = data as { id: number; priority: number }
+    storedModel = {
+      ...storedModel,
+      bound_channels: storedModel.bound_channels?.map((channel) =>
+        channel.id === update.id
+          ? { ...channel, priority: update.priority }
+          : channel
+      ),
+    }
+    return { data: { success: true } }
+  })
+  const close = vi.fn()
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <ModelMutateDrawer open onOpenChange={close} currentRow={initialModel} />
+    </QueryClientProvider>
+  )
+  return { get, put, client }
+}
+
+describe('model channel priority editing', () => {
+  it.each([7, 0])(
+    'saves only the selected channel and keeps its priority and metadata draft across tabs for model ID %i',
+    async (id) => {
+      const { get, put, client } = renderPriorityEditor(id)
+      const user = userEvent.setup()
+      const description = await screen.findByLabelText('Description')
+      await waitFor(() => expect(description).toHaveValue(id ? 'Original' : ''))
+      await user.clear(description)
+      await user.type(description, 'Keep this metadata draft')
+      await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
+      const mainRow = within(screen.getByRole('row', { name: /OP_Luna/ }))
+      expect(
+        screen.getByRole('columnheader', { name: 'Priority' })
+      ).toBeVisible()
+      expect(
+        within(screen.getByRole('row', { name: /zenmux/ })).getByRole(
+          'button',
+          {
+            name: '0',
+          }
+        )
+      ).toBeVisible()
+      await user.click(mainRow.getByRole('button', { name: '10' }))
+      await user.clear(mainRow.getByRole('textbox'))
+      await user.type(mainRow.getByRole('textbox'), '-2{Enter}')
+      await waitFor(() =>
+        expect(put).toHaveBeenCalledWith(
+          '/api/channel/',
+          { id: 101, priority: -2 },
+          expect.any(Object)
+        )
+      )
+      await waitFor(() =>
+        expect(mainRow.getByRole('button', { name: '-2' })).toBeEnabled()
+      )
+      await user.click(screen.getByRole('tab', { name: 'Model metadata' }))
+      expect(screen.getByLabelText('Description')).toHaveValue(
+        'Keep this metadata draft'
+      )
+      await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
+      const updatedRow = within(screen.getByRole('row', { name: /OP_Luna/ }))
+      await user.click(updatedRow.getByRole('button', { name: '-2' }))
+      await user.clear(updatedRow.getByRole('textbox'))
+      await user.type(updatedRow.getByRole('textbox'), '0')
+      await user.tab()
+      await waitFor(() =>
+        expect(put).toHaveBeenLastCalledWith(
+          '/api/channel/',
+          { id: 101, priority: 0 },
+          expect.any(Object)
+        )
+      )
+      await waitFor(() =>
+        expect(updatedRow.getByRole('button', { name: '0' })).toBeEnabled()
+      )
+      expect(put).toHaveBeenCalledTimes(2)
+      expect(get).not.toHaveBeenCalledWith('/api/models/0')
+      client.clear()
+    }
+  )
+
+  it('shows priorities without editing when channel write permission is absent', async () => {
+    const { put, client } = renderPriorityEditor(7, false)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
+    const row = within(await screen.findByRole('row', { name: /OP_Luna/ }))
+    for (const button of row.getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
+    expect(row.getByRole('button', { name: '10' })).toBeVisible()
+    expect(put).not.toHaveBeenCalled()
+    client.clear()
+  })
+
+  it('reports a failed save and keeps the stored priority across tabs', async () => {
+    const { put, client } = renderPriorityEditor()
+    put.mockResolvedValueOnce({
+      data: { success: false, message: 'Priority update denied' },
+    })
+    const showError = vi.spyOn(toast, 'error')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
+    const row = within(await screen.findByRole('row', { name: /OP_Luna/ }))
+    await user.click(row.getByRole('button', { name: '10' }))
+    await user.clear(row.getByRole('textbox'))
+    await user.type(row.getByRole('textbox'), '20{Enter}')
+    await waitFor(() =>
+      expect(showError).toHaveBeenCalledWith('Priority update denied')
+    )
+    await user.click(screen.getByRole('tab', { name: 'Model metadata' }))
+    await user.click(screen.getByRole('tab', { name: 'Channels and groups' }))
+    expect(
+      within(screen.getByRole('row', { name: /OP_Luna/ })).getByRole('button', {
+        name: '10',
+      })
+    ).toBeVisible()
     client.clear()
   })
 })

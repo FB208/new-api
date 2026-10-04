@@ -384,7 +384,7 @@ it('keeps prices and channel explanations readable in the mobile card and detail
 })
 
 it('uses backend square states for success, warning, hidden, and partial rows including models without metadata', async () => {
-  const activeChannels = [{ name: 'Active', type: 1 }]
+  const activeChannels = [{ id: 1, name: 'Active', type: 1, priority: 0 }]
   await renderList([
     { ...metadata, model_name: 'catalog-only' },
     {
@@ -789,7 +789,7 @@ it('keeps all columns while collapsing tags and connection counts', async () => 
     {
       ...channel,
       tags: 'Tools,Files,Vision',
-      bound_channels: [{ name: 'Main', type: 1 }],
+      bound_channels: [{ id: 1, name: 'Main', type: 1, priority: 0 }],
       enable_groups: ['default', 'premium'],
     },
   ])

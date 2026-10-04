@@ -39,7 +39,7 @@ const modelsSearchSchema = z.object({
   status: z.array(z.string()).optional().catch([]),
   square_state: z
     .array(z.enum(['visible', 'unavailable', 'hidden', 'partial']))
-    .optional()
+    .default(['visible'])
     .catch([]),
   sync: z.array(z.string()).optional().catch([]),
   dPage: z.number().optional().catch(1),

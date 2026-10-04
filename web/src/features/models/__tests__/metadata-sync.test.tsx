@@ -27,6 +27,7 @@ import { SyncWizardDialog } from '../components/dialogs/sync-wizard-dialog'
 import type { MetadataSyncCandidate, MetadataSyncPreview } from '../types'
 
 const preview: MetadataSyncPreview = {
+  enabled_models: [],
   source: {
     locale: 'en',
     models_url: 'https://example.test/models.json',

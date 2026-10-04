@@ -290,7 +290,11 @@ func enrichModels(models []*model.Model) error {
 			}
 			names[name] = true
 			groups[connection.Group] = true
-			channels[connection.ChannelId] = model.BoundChannel{Name: connection.ChannelName, Type: connection.ChannelType}
+			channel := model.BoundChannel{Id: connection.ChannelId, Name: connection.ChannelName, Type: connection.ChannelType}
+			if connection.Priority != nil {
+				channel.Priority = *connection.Priority
+			}
+			channels[connection.ChannelId] = channel
 			for _, endpoint := range model.GetModelSupportEndpointTypes(name) {
 				endpoints[string(endpoint)] = true
 			}
