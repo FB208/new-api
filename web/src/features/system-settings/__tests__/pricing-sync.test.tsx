@@ -297,6 +297,9 @@ describe('pricing synchronization', () => {
   it('previews the expression, rejects a stale save and reloads before applying without residual ratio differences', async () => {
     let version = 'v1'
     const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url === '/api/channel/models_enabled') {
+        return { data: { success: true, data: [] } }
+      }
       if (url === '/api/ratio_sync/channels') {
         return {
           data: {
@@ -462,6 +465,9 @@ describe('pricing synchronization', () => {
 
 it('shows a source failure instead of a no-differences result and retries the selected source', async () => {
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/channel/models_enabled') {
+      return { data: { success: true, data: [] } }
+    }
     if (url === '/api/ratio_sync/channels') {
       return {
         data: {

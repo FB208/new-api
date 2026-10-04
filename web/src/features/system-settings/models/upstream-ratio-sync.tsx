@@ -24,6 +24,7 @@ import { toast } from 'sonner'
 
 import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
+import { getEnabledModels } from '@/features/channels/api'
 import {
   buildPricingChanges,
   getModelPricing,
@@ -63,6 +64,7 @@ import {
 import {
   describeSyncPrice,
   getUpstreamDisplayName,
+  sameSyncPrice,
   type PricingSourceSelection,
   type PricingSourceSelections,
 } from './upstream-ratio-sync-helpers'
@@ -120,7 +122,10 @@ export function UpstreamRatioSync() {
   )
   const fetchMutation = useMutation({
     mutationFn: async (request: Parameters<typeof fetchUpstreamRatios>[0]) => {
-      const response = await fetchUpstreamRatios(request)
+      const [response, enabledModelsResponse] = await Promise.all([
+        fetchUpstreamRatios(request),
+        getEnabledModels().then(requireServerSuccess),
+      ])
       if (!response.success || !response.data?.prices) {
         throw createServerError(response, t('Failed to fetch upstream prices'))
       }
@@ -138,7 +143,7 @@ export function UpstreamRatioSync() {
             .join(', ')
         )
       }
-      return response
+      return { ...response, enabledModels: enabledModelsResponse.data }
     },
     onMutate: () => {
       setPrices({})
@@ -163,6 +168,17 @@ export function UpstreamRatioSync() {
       }
       setDifferences(response.data.differences)
       setPrices(response.data.prices)
+      // Select enabled models using the first differing source in table order.
+      const defaults: PricingSourceSelections = {}
+      for (const name of new Set(response.enabledModels)) {
+        const row = response.data.prices[name]
+        if (!row) continue
+        const source = Object.keys(row.upstreams)
+          .sort()
+          .find((source) => !sameSyncPrice(row.current, row.upstreams[source]))
+        if (source) defaults[name] = source
+      }
+      setSelectedSources(defaults)
       if (!Object.keys(response.data.prices).length) {
         toast.success(t('No price differences found'))
       }
