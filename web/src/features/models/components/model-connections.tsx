@@ -55,6 +55,9 @@ export function ModelConnections(props: {
       <ModelSquareStatus model={props.model} detail />
       <section className='space-y-3'>
         <h3 className='font-medium'>{t('Bound Channels')}</h3>
+        <p className='text-muted-foreground text-sm'>
+          {t('Higher values mean higher priority')}
+        </p>
         {props.model.bound_channels?.length ? (
           <StaticDataTable
             data={props.model.bound_channels}
