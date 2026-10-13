@@ -90,6 +90,52 @@ func TestOaiResponsesToChatStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
 	)
 }
 
+func TestOaiStreamHandlerReportsUpstreamCutOffInsteadOfDone(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	chunk := func(content, finish string) string {
+		finishReason := "null"
+		if finish != "" {
+			finishReason = `"` + finish + `"`
+		}
+		return `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"` + content + `"},"finish_reason":` + finishReason + `}]}`
+	}
+	for _, tc := range []struct {
+		name          string
+		lines         []string
+		wantTruncated bool
+	}{
+		{name: "upstream closes without finish_reason or [DONE]", lines: []string{chunk("hel", ""), chunk("lo", "")}, wantTruncated: true},
+		{name: "finish_reason without [DONE] is complete", lines: []string{chunk("hello", ""), chunk("", "stop")}, wantTruncated: false},
+		{name: "[DONE] without finish_reason is complete", lines: []string{chunk("hello", ""), `data: [DONE]`}, wantTruncated: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder, resp, info := newResponsesChatTestContext(t, strings.Join(append(tc.lines, ""), "\n"), true)
+
+			usage, err := OaiStreamHandler(c, info, resp)
+			require.Nil(t, err)
+			require.NotNil(t, usage, "usage is still settled for a cut-off stream")
+
+			got := recorder.Body.String()
+			assert.Contains(t, got, `"content":"hel`, "content received before the end is forwarded")
+			assert.Equal(t, tc.wantTruncated, info.StreamStatus.MissingTerminal())
+			if tc.wantTruncated {
+				requireOrderedSubstrings(t, got, `"content":"hel"`, `"content":"lo"`, `"code":"stream_truncated"`)
+				assert.NotContains(t, got, `[DONE]`, "a cut-off stream must not be closed as a normal end")
+				return
+			}
+			assert.Contains(t, got, `data: [DONE]`)
+			assert.NotContains(t, got, `stream_truncated`)
+		})
+	}
+}
+
 func TestOaiResponsesToChatStreamHandlerConvertsClaudeSSETerminalsAndUsage(t *testing.T) {
 	oldMode := gin.Mode()
 	gin.SetMode(gin.TestMode)

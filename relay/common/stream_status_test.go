@@ -151,6 +151,37 @@ func TestStreamStatus_IsNormalEnd(t *testing.T) {
 	}
 }
 
+func TestStreamStatus_MissingTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		requireTerminal bool
+		reason          StreamEndReason
+		mark            func(*StreamStatus)
+		missing         bool
+	}{
+		{name: "eof without terminal event", requireTerminal: true, reason: StreamEndReasonEOF, missing: true},
+		{name: "timeout without terminal event", requireTerminal: true, reason: StreamEndReasonTimeout, missing: true},
+		{name: "[DONE] counts as the terminal", requireTerminal: true, reason: StreamEndReasonDone, missing: false},
+		{name: "completed before eof", requireTerminal: true, reason: StreamEndReasonEOF, mark: (*StreamStatus).MarkCompleted, missing: false},
+		{name: "failed before eof is reported as failed", requireTerminal: true, reason: StreamEndReasonEOF, mark: func(s *StreamStatus) { s.MarkFailed("server_error", "", 0) }, missing: false},
+		{name: "protocol without a required terminal", requireTerminal: false, reason: StreamEndReasonEOF, missing: false},
+	}
+	for _, tt := range tests {
+		s := NewStreamStatus()
+		if tt.requireTerminal {
+			s.RequireTerminal()
+		}
+		if tt.mark != nil {
+			tt.mark(s)
+		}
+		s.SetEndReason(tt.reason, nil)
+		assert.Equal(t, tt.missing, s.MissingTerminal(), tt.name)
+	}
+	var nilStatus *StreamStatus
+	assert.False(t, nilStatus.MissingTerminal())
+}
+
 func TestStreamStatus_IsNormalEnd_NilSafe(t *testing.T) {
 	t.Parallel()
 	var s *StreamStatus

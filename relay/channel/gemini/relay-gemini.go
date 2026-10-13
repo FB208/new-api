@@ -359,6 +359,12 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	if err != nil {
 		return usage, err
 	}
+	// A blocked prompt also ends without a finish reason, but that is the
+	// answer itself, so only a genuinely cut-off stream becomes an error.
+	if info.StreamStatus.MissingTerminal() && !info.PerformanceBusinessRejection {
+		helper.StreamTruncatedError(c, info)
+		return usage, nil
+	}
 
 	response := helper.GenerateFinalUsageResponse(id, createAt, info.UpstreamModelName, *usage)
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil && !info.ClaudeConvertInfo.Done {

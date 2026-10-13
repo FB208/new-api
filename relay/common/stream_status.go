@@ -170,6 +170,18 @@ func (s *StreamStatus) ResponseFailed() bool {
 	return s.ResponseOutcome() == string(ResponseOutcomeFailed)
 }
 
+// MissingTerminal reports a stream whose protocol requires an explicit terminal
+// event but that ended without one and without [DONE], e.g. the upstream closed
+// the connection mid-response. Such a stream is cut short, not complete.
+func (s *StreamStatus) MissingTerminal() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expectsTerminal && s.response == ResponseOutcomeUnknown && s.EndReason != StreamEndReasonDone
+}
+
 func (s *StreamStatus) OutcomeSnapshot() StreamOutcome {
 	if s == nil {
 		return StreamOutcome{}
@@ -227,6 +239,9 @@ func (s *StreamStatus) Summary() string {
 	s.mu.Lock()
 	if s.ErrorCount > 0 {
 		fmt.Fprintf(b, " soft_errors=%d", s.ErrorCount)
+	}
+	if s.response != ResponseOutcomeUnknown {
+		fmt.Fprintf(b, " response=%s", s.response)
 	}
 	s.mu.Unlock()
 	return b.String()

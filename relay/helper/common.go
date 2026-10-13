@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
@@ -135,6 +136,39 @@ func ObjectData(c *gin.Context, object any) error {
 
 func Done(c *gin.Context) {
 	_ = StringData(c, "[DONE]")
+}
+
+const streamTruncatedMessage = "upstream stream ended before the response completed"
+
+// StreamTruncatedError ends a stream whose upstream closed without its terminal
+// event. Instead of the usual closing frames ([DONE], a final usage chunk or the
+// converted finish events), which would make a cut-off answer look complete, it
+// sends one error event in the client's protocol so the caller can detect the
+// failure and retry.
+func StreamTruncatedError(c *gin.Context, info *relaycommon.RelayInfo) {
+	logger.LogError(c, fmt.Sprintf("upstream stream ended without a terminal event: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
+	if requestContextDone(c) {
+		return
+	}
+	var event map[string]any
+	switch info.RelayFormat {
+	case types.RelayFormatClaude:
+		event = map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": streamTruncatedMessage}}
+	case types.RelayFormatGemini:
+		event = map[string]any{"error": map[string]any{"code": http.StatusBadGateway, "message": streamTruncatedMessage, "status": "UNAVAILABLE"}}
+	default:
+		event = map[string]any{"error": map[string]any{"message": streamTruncatedMessage, "type": "upstream_error", "code": "stream_truncated"}}
+	}
+	data, err := common.Marshal(event)
+	if err != nil {
+		common.SysError("error marshalling stream truncated event: " + err.Error())
+		return
+	}
+	if info.RelayFormat == types.RelayFormatClaude {
+		c.Render(-1, common.CustomEvent{Data: "event: error\n"})
+	}
+	c.Render(-1, common.CustomEvent{Data: "data: " + string(data)})
+	_ = FlushWriter(c)
 }
 
 func WssString(c *gin.Context, ws *websocket.Conn, str string) error {
