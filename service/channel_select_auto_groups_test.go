@@ -64,9 +64,8 @@ func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 	return db
 }
 
-func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, group, modelName string) {
+func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, groups, modelName string, priority int64) {
 	t.Helper()
-	priority := int64(0)
 	weight := uint(100)
 	require.NoError(t, db.Create(&model.Channel{
 		Id:       id,
@@ -76,24 +75,26 @@ func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, gro
 		Name:     fmt.Sprintf("channel-%d", id),
 		Weight:   &weight,
 		Models:   modelName,
-		Group:    group,
+		Group:    groups,
 		Priority: &priority,
 	}).Error)
-	require.NoError(t, db.Create(&model.Ability{
-		Group:     group,
-		Model:     modelName,
-		ChannelId: id,
-		Enabled:   true,
-		Priority:  &priority,
-		Weight:    weight,
-	}).Error)
+	for group := range strings.SplitSeq(groups, ",") {
+		require.NoError(t, db.Create(&model.Ability{
+			Group:     group,
+			Model:     modelName,
+			ChannelId: id,
+			Enabled:   true,
+			Priority:  &priority,
+			Weight:    weight,
+		}).Error)
+	}
 }
 
 func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(t *testing.T) {
 	db := setupChannelSelectAutoGroupsTest(t)
 	const modelName = "auto-groups-runtime-model"
-	createChannelSelectAutoGroupsChannel(t, db, 2101, "vip", modelName)
-	createChannelSelectAutoGroupsChannel(t, db, 2102, "default", modelName)
+	createChannelSelectAutoGroupsChannel(t, db, 2101, "vip", modelName, 0)
+	createChannelSelectAutoGroupsChannel(t, db, 2102, "default", modelName, 0)
 	model.InitChannelCache()
 
 	gin.SetMode(gin.TestMode)
@@ -126,4 +127,75 @@ func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(
 	assert.Equal(t, 2102, second.Id)
 	assert.Equal(t, "default", selectedGroup)
 	assert.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+}
+
+// selectUntilChannelsExhausted mirrors the relay retry loop: it keeps selecting
+// while HasUntriedChannel allows another retry and returns the channels in the
+// order they were attempted.
+func selectUntilChannelsExhausted(t *testing.T, param *RetryParam) []int {
+	t.Helper()
+	var selected []int
+	for HasUntriedChannel(param) {
+		require.Less(t, len(selected), 10, "selection must stop once every channel was tried")
+		channel, _, err := CacheGetRandomSatisfiedChannel(param)
+		require.NoError(t, err)
+		require.NotNil(t, channel, "HasUntriedChannel promised another channel")
+		selected = append(selected, channel.Id)
+		param.MarkChannelTried(channel.Id)
+		param.IncreaseRetry()
+	}
+	channel, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	assert.Nil(t, channel, "no channel may be selected after every candidate was tried")
+	return selected
+}
+
+func TestCacheGetRandomSatisfiedChannelTriesEachChannelOnceByPriority(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	common.RetryTimes = 10
+	const modelName = "retry-order-model"
+	createChannelSelectAutoGroupsChannel(t, db, 3101, "default", modelName, 10)
+	createChannelSelectAutoGroupsChannel(t, db, 3102, "default", modelName, 5)
+	createChannelSelectAutoGroupsChannel(t, db, 3103, "default", modelName, 5)
+	createChannelSelectAutoGroupsChannel(t, db, 3104, "default", modelName, 0)
+	createChannelSelectAutoGroupsChannel(t, db, 3105, "vip", modelName, 20)
+	model.InitChannelCache()
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	selected := selectUntilChannelsExhausted(t, &RetryParam{Ctx: ctx, TokenGroup: "default", ModelName: modelName, Retry: common.GetPointer(0)})
+
+	require.Len(t, selected, 4, "each channel of the group is tried exactly once despite RetryTimes=10")
+	assert.Equal(t, 3101, selected[0])
+	assert.ElementsMatch(t, []int{3102, 3103}, selected[1:3])
+	assert.Equal(t, 3104, selected[3])
+}
+
+func TestCacheGetRandomSatisfiedChannelAutoGroupSkipsTriedChannels(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		crossGroupRetry bool
+		want            []int
+	}{
+		{name: "without cross-group retry the first group's channels are the limit", crossGroupRetry: false, want: []int{4101}},
+		{name: "with cross-group retry the next group skips the shared tried channel", crossGroupRetry: true, want: []int{4101, 4102}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupChannelSelectAutoGroupsTest(t)
+			common.RetryTimes = 3
+			const modelName = "auto-retry-model"
+			createChannelSelectAutoGroupsChannel(t, db, 4101, "vip,default", modelName, 0)
+			createChannelSelectAutoGroupsChannel(t, db, 4102, "default", modelName, 0)
+			model.InitChannelCache()
+
+			gin.SetMode(gin.TestMode)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+			common.SetContextKey(ctx, constant.ContextKeyTokenCrossGroupRetry, tc.crossGroupRetry)
+
+			selected := selectUntilChannelsExhausted(t, &RetryParam{Ctx: ctx, TokenGroup: "auto", ModelName: modelName, Retry: common.GetPointer(0)})
+			assert.Equal(t, tc.want, selected)
+		})
+	}
 }

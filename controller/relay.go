@@ -167,6 +167,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
+		retryParam.MarkChannelTried(channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
@@ -205,6 +206,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.LastError = newAPIError
 
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+		if decision.Action == "retry" && !service.HasUntriedChannel(retryParam) {
+			decision = service.PolicyDecision{Action: "stop", Reason: "channels_exhausted", Source: "routing"}
+		}
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
@@ -531,6 +535,7 @@ func executeTaskSubmissionWith(
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
 
 		service.AppendUsedChannel(c, channel.Id)
+		retryParam.MarkChannelTried(channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			stage = "read_body"
@@ -558,6 +563,11 @@ func executeTaskSubmissionWith(
 		taskAPIError := taskSubmissionAPIError(taskErr)
 		relayInfo.LastError = taskAPIError
 		decision := decideTaskRetry(c, taskErr, common.RetryTimes-retryParam.GetRetry())
+		// A locked channel is the only channel this request may use, and a
+		// request never retries a channel it already tried.
+		if decision.Action == "retry" && (relayInfo.LockedChannel != nil || !service.HasUntriedChannel(retryParam)) {
+			decision = service.PolicyDecision{Action: "stop", Reason: "channels_exhausted", Source: "routing"}
+		}
 		service.RecordPolicyFailure(c, channel.Id, taskAPIError, decision)
 		if !taskErr.LocalError {
 			processChannelError(c,

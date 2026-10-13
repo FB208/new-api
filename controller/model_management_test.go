@@ -1374,7 +1374,7 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 					}
 					common.MemoryCacheEnabled = true
 					model.InitChannelCache()
-					cached, err := model.GetRandomSatisfiedChannel("default", name, 0, nil)
+					cached, err := model.GetRandomSatisfiedChannel("default", name, nil, nil)
 					require.NoError(t, err)
 					require.NotNil(t, cached)
 					baseline, err := model.GetModelPricingSnapshot([]string{name})
@@ -1414,7 +1414,7 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 						require.NoError(t, db.First(&after, original.Id).Error)
 						assert.Equal(t, original, after)
 					}
-					cached, err = model.GetRandomSatisfiedChannel("default", name, 0, nil)
+					cached, err = model.GetRandomSatisfiedChannel("default", name, nil, nil)
 					require.NoError(t, err)
 					require.NotNil(t, cached)
 					recorder := modelManagementRequest(t, BatchDeleteModelMeta, http.MethodPost, "/api/models/delete", body, &response)
@@ -1443,10 +1443,10 @@ func TestModelDeletionDatabaseMatrix(t *testing.T) {
 						}
 					}
 					for _, group := range []string{"default", "vip", "last-model-group"} {
-						cached, _ = model.GetRandomSatisfiedChannel(group, name, 0, nil)
+						cached, _ = model.GetRandomSatisfiedChannel(group, name, nil, nil)
 						assert.Nil(t, cached)
 					}
-					cached, err = model.GetRandomSatisfiedChannel("default", name+"-keep", 0, nil)
+					cached, err = model.GetRandomSatisfiedChannel("default", name+"-keep", nil, nil)
 					require.NoError(t, err)
 					require.NotNil(t, cached)
 					pricingAfter, err := model.GetModelPricingSnapshot([]string{name, second.ModelName})

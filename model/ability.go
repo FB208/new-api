@@ -3,7 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"math"
+	"slices"
 	"strings"
 	"sync"
 
@@ -105,10 +106,12 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
+// GetChannel is the database counterpart of GetRandomSatisfiedChannel: it
+// picks from the highest priority left after removing excludedChannelIds.
 func GetChannel(
 	group string,
 	model string,
-	retry int,
+	excludedChannelIds []int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
 	var abilities []Ability
@@ -117,24 +120,14 @@ func GetChannel(
 		return nil, err
 	}
 	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	abilities = slices.DeleteFunc(abilities, func(ability Ability) bool {
+		return slices.Contains(excludedChannelIds, ability.ChannelId)
+	})
 	if len(abilities) > 0 {
-		priorities := make([]int64, 0)
-		seen := make(map[int64]bool)
+		targetPriority := int64(math.MinInt64)
 		for _, ability := range abilities {
-			priority := int64(0)
-			if ability.Priority != nil {
-				priority = *ability.Priority
-			}
-			if !seen[priority] {
-				seen[priority] = true
-				priorities = append(priorities, priority)
-			}
+			targetPriority = max(targetPriority, lo.FromPtr(ability.Priority))
 		}
-		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
-		if retry >= len(priorities) {
-			retry = len(priorities) - 1
-		}
-		targetPriority := priorities[retry]
 		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
 			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
 		})

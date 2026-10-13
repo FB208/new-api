@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -172,6 +173,49 @@ func TestFilterCandidateIDs(t *testing.T) {
 				assert.Equal(t, testCase.wantKept, kept)
 			}
 			assert.Equal(t, testCase.wantEmpty, emptiedBy)
+		})
+	}
+}
+
+// Retries pass the channels already tried; both channel sources must then pick
+// from the highest remaining priority and return nil once none is left, without
+// falling back to the normalized-model channels.
+func TestChannelSelectionExcludesTriedChannelsOnBothCachePaths(t *testing.T) {
+	for _, memoryCache := range []bool{true, false} {
+		t.Run(fmt.Sprintf("memory_cache_%t", memoryCache), func(t *testing.T) {
+			truncateTables(t)
+			originalMemoryCache := common.MemoryCacheEnabled
+			common.MemoryCacheEnabled = memoryCache
+			t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCache; InitChannelCache() })
+			// gpt-4-gizmo-retry normalizes to gpt-4-gizmo-*, served only by the fallback channel.
+			const modelName = "gpt-4-gizmo-retry"
+			high, low := int64(10), int64(0)
+			for _, channel := range []Channel{
+				{Id: 930001, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "high", Models: modelName, Group: "default", Priority: &high},
+				{Id: 930002, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "low", Models: modelName, Group: "default", Priority: &low},
+				{Id: 930003, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Name: "normalized", Models: "gpt-4-gizmo-*", Group: "default", Priority: &high},
+			} {
+				require.NoError(t, channel.Insert())
+			}
+			InitChannelCache()
+
+			for _, step := range []struct {
+				excluded []int
+				wantId   int
+			}{
+				{excluded: nil, wantId: 930001},
+				{excluded: []int{930001}, wantId: 930002},
+				{excluded: []int{930001, 930002}, wantId: 0},
+			} {
+				selected, err := GetRandomSatisfiedChannel("default", modelName, step.excluded, nil)
+				require.NoError(t, err)
+				if step.wantId == 0 {
+					assert.Nil(t, selected, "excluded=%v", step.excluded)
+					continue
+				}
+				require.NotNil(t, selected, "excluded=%v", step.excluded)
+				assert.Equal(t, step.wantId, selected.Id, "excluded=%v", step.excluded)
+			}
 		})
 	}
 }

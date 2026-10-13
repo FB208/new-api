@@ -288,6 +288,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				return apiErr
 			}
 			service.AppendUsedChannel(c, channel.Id)
+			retry.MarkChannelTried(channel.Id)
 			if info == nil {
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 				info.IsStream = true
@@ -317,6 +318,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 				info.LastError = apiErr
 				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
+				if decision.Action == "retry" && !service.HasUntriedChannel(retry) {
+					decision = service.PolicyDecision{Action: "stop", Reason: "channels_exhausted", Source: "routing"}
+				}
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
 				if decision.Action == "retry" {

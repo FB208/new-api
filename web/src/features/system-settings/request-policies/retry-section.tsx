@@ -55,7 +55,9 @@ export function RetrySection() {
                 />
               </FormControl>
               <FormDescription>
-                {t('Excludes the first attempt. Counted per group.')}
+                {t(
+                  'Excludes the first attempt, counted per group. Each channel is tried at most once; retries stop after all available channels are tried.'
+                )}
               </FormDescription>
               <FormMessage />
             </FormItem>

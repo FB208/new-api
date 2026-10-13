@@ -995,22 +995,28 @@ func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {
 
 func TestResponsesHTTPHealthCountsFinalResult(t *testing.T) {
 	for _, tc := range []struct {
-		name, code            string
-		firstStatus, attempts int
-		success               bool
-		ignored               bool
+		name, code                      string
+		firstStatus, channels, attempts int
+		success                         bool
+		ignored                         bool
 	}{
-		{"business rejection", "context_length_exceeded", 400, 1, false, true},
-		{"credentials rejected as 400", "invalid_api_key", 400, 1, false, false},
-		{"retry succeeds", "server_error", 500, 2, true, false},
+		{"business rejection", "context_length_exceeded", 400, 1, 1, false, true},
+		{"credentials rejected as 400", "invalid_api_key", 400, 1, 1, false, false},
+		{"single multi-key channel is not retried", "server_error", 500, 1, 1, false, false},
+		{"retry moves to another channel and succeeds", "server_error", 500, 2, 2, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
 			oldRetries := common.RetryTimes
-			common.RetryTimes = 1
+			common.RetryTimes = 3
 			t.Cleanup(func() { common.RetryTimes = oldRetries })
 			var attempts atomic.Int64
+			var authMu sync.Mutex
+			var authHeaders []string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				authMu.Lock()
+				authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+				authMu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
 				if attempts.Add(1) == 1 {
 					w.WriteHeader(tc.firstStatus)
@@ -1021,6 +1027,15 @@ func TestResponsesHTTPHealthCountsFinalResult(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 			require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "responses-ws-upstream").Update("base_url", upstream.URL).Error)
+			if tc.channels > 1 {
+				second := &model.Channel{Name: "responses-http-second", Key: "upstream-other", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: "ws-billing", BaseURL: &upstream.URL, ModelMapping: fixture.channel.ModelMapping}
+				require.NoError(t, model.DB.Create(second).Error)
+				require.NoError(t, model.DB.Create(&model.Ability{ChannelId: second.Id, Model: "ws-billing", Group: "default", Enabled: true}).Error)
+				t.Cleanup(func() {
+					require.NoError(t, model.DB.Where("channel_id = ?", second.Id).Delete(&model.Ability{}).Error)
+					require.NoError(t, model.DB.Delete(second).Error)
+				})
+			}
 			request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":"hello"}`))
 			require.NoError(t, err)
 			request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
@@ -1037,6 +1052,11 @@ func TestResponsesHTTPHealthCountsFinalResult(t *testing.T) {
 			}
 			fixture.closeAndWait(t)
 			assert.Equal(t, int64(tc.attempts), attempts.Load())
+			if tc.channels > 1 {
+				authMu.Lock()
+				assert.Contains(t, authHeaders, "Bearer upstream-other", "the retry must use the other channel")
+				authMu.Unlock()
+			}
 			if !tc.success {
 				assert.Equal(t, tc.firstStatus, response.StatusCode)
 			} else {

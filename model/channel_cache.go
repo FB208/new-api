@@ -3,7 +3,9 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -114,15 +116,19 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
+// GetRandomSatisfiedChannel picks a channel from the highest priority that
+// still has candidates once excludedChannelIds are removed, weighted randomly
+// within that priority. Retries pass the channels the request already tried,
+// so each retry moves to an untried channel and nil means none is left.
 func GetRandomSatisfiedChannel(
 	group string,
 	model string,
-	retry int,
+	excludedChannelIds []int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, filters)
+		return GetChannel(group, model, excludedChannelIds, filters)
 	}
 
 	channelSyncLock.RLock()
@@ -137,6 +143,14 @@ func GetRandomSatisfiedChannel(
 		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
 	}
 
+	// Exclude tried channels only after the candidate set is fixed, so exhausting
+	// the exact-model channels never falls back to the normalized-model ones.
+	if len(excludedChannelIds) > 0 {
+		channels = slices.DeleteFunc(slices.Clone(channels), func(channelId int) bool {
+			return slices.Contains(excludedChannelIds, channelId)
+		})
+	}
+
 	if len(channels) == 0 {
 		return nil, nil
 	}
@@ -148,26 +162,15 @@ func GetRandomSatisfiedChannel(
 		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
 	}
 
-	uniquePriorities := make(map[int]bool)
+	targetPriority := int64(math.MinInt64)
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
-		} else {
+		channel, ok := channelsIDM[channelId]
+		if !ok {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
+		targetPriority = max(targetPriority, channel.GetPriority())
 	}
-	var sortedUniquePriorities []int
-	for priority := range uniquePriorities {
-		sortedUniquePriorities = append(sortedUniquePriorities, priority)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sortedUniquePriorities)))
 
-	if retry >= len(uniquePriorities) {
-		retry = len(uniquePriorities) - 1
-	}
-	targetPriority := int64(sortedUniquePriorities[retry])
-
-	// get the priority for the given retry number
 	var sumWeight = 0
 	var targetChannels []*Channel
 	for _, channelId := range channels {
